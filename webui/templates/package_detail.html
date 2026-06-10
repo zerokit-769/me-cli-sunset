@@ -8,9 +8,9 @@
 {% set family_code = fam.package_family_code %}
 {% set variant_code = pkg.get('package_variant', {}).get('package_variant_code', '') %}
 
-<div class="card mb-4">
-  <div class="flex items-start justify-between gap-3">
-    <div>
+<div class="card mb-4 min-w-0 w-full">
+  <div class="flex items-start justify-between gap-3 min-w-0">
+    <div class="min-w-0 flex-1">
       <div class="text-xs text-slate-400">{{ fam.name }}{% if var %} · {{ var.name }}{% endif %}</div>
       <h1 class="text-xl font-bold">{{ opt.name }}</h1>
       <div class="text-2xl font-bold text-indigo-300 mt-2">{{ opt.price | rp }}</div>
@@ -28,11 +28,17 @@
       <button type="submit" class="btn btn-secondary" title="Bookmark">🔖</button>
     </form>
   </div>
-  <div class="grid grid-cols-2 gap-3 mt-4 text-xs">
-    <div><span class="text-slate-400">Family code:</span> <span class="font-mono">{{ family_code }}</span></div>
-    <div><span class="text-slate-400">Option code:</span> <span class="font-mono">{{ option_code }}</span></div>
-    <div><span class="text-slate-400">Payment for:</span> {{ fam.payment_for }}</div>
-    <div><span class="text-slate-400">Plan type:</span> {{ fam.plan_type }}</div>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 text-xs min-w-0 w-full">
+    <div class="code-field min-w-0">
+      <div class="text-slate-400 mb-1">Family code</div>
+      <div class="code-wrap break-all text-slate-200">{{ family_code }}</div>
+    </div>
+    <div class="code-field min-w-0 w-full sm:col-span-2">
+      <div class="text-slate-400 mb-1">Option code</div>
+      <div class="code-wrap break-all text-slate-200">{{ option_code }}</div>
+    </div>
+    <div class="code-field"><span class="text-slate-400">Payment for:</span> {{ fam.payment_for }}</div>
+    <div class="code-field"><span class="text-slate-400">Plan type:</span> {{ fam.plan_type }}</div>
   </div>
 </div>
 
@@ -111,19 +117,35 @@
       <input class="form-input" type="number" name="qris_amount" min="0" placeholder="(opsional)">
       <p class="text-xs text-slate-500 mt-1">QRIS decoy butuh amount yang server terima (Bizz-err.Amount.Total). Coba angka di sekitar harga paket utama.</p>
     </div>
-    <button class="btn btn-primary w-full" type="submit">Bayar</button>
+    <button class="btn btn-primary w-full" type="button" data-confirm-trigger>Bayar</button>
   </form>
   <script>
-    document.querySelector('select[name=method]').addEventListener('change', function(e){
-      var v = e.target.value;
-      var sel = e.target.options[e.target.selectedIndex];
-      var label = sel.text || '';
-      document.getElementById('wallet-num').style.display = v.startsWith('ewallet') ? 'block' : 'none';
-      // QRIS amount input — for built-in QRIS decoys OR custom decoys whose label starts with "QRIS"
-      var isQrisDecoy = (v === 'decoy_qris' || v === 'decoy_qris0' ||
-                         (v.startsWith('decoy_custom_') && label.trim().startsWith('QRIS')));
-      document.getElementById('qris-amount').style.display = isQrisDecoy ? 'block' : 'none';
-    });
+    (function(){
+      var methodSel = document.querySelector('select[name=method]');
+      var walletInput = document.querySelector('input[name=wallet_number]');
+      var qrisInput = document.querySelector('input[name=qris_amount]');
+      function syncMethodFields() {
+        var v = methodSel.value;
+        var sel = methodSel.options[methodSel.selectedIndex];
+        var label = sel.text || '';
+        var needWallet = v.startsWith('ewallet');
+        document.getElementById('wallet-num').style.display = needWallet ? 'block' : 'none';
+        if (walletInput) {
+          walletInput.disabled = !needWallet;
+          walletInput.required = needWallet;
+          if (!needWallet) walletInput.value = '';
+        }
+        var isQrisDecoy = (v === 'decoy_qris' || v === 'decoy_qris0' ||
+                           (v.startsWith('decoy_custom_') && label.trim().startsWith('QRIS')));
+        document.getElementById('qris-amount').style.display = isQrisDecoy ? 'block' : 'none';
+        if (qrisInput) {
+          qrisInput.disabled = !isQrisDecoy;
+          if (!isQrisDecoy) qrisInput.value = '';
+        }
+      }
+      methodSel.addEventListener('change', syncMethodFields);
+      syncMethodFields();
+    })();
   </script>
 </div>
 {% endblock %}

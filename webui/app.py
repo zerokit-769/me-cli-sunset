@@ -114,6 +114,11 @@ def create_app() -> FastAPI:
     from webui.middleware import WebUIAuthMiddleware
     app.add_middleware(WebUIAuthMiddleware)
 
+    # Support Cloudflare Tunnel / reverse proxy (so request.url.scheme becomes https,
+    # secure cookies work, and redirects are correct when accessed via tunnel URL).
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
     static_dir = BASE_DIR / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -163,32 +168,59 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
-        return HTMLResponse(
-            templates.get_template("error.html").render(
+        webui_user = getattr(request.state, "webui_user", None)
+        active = None
+        accts = []
+        try:
+            from webui.deps import get_active_user_safe, list_accounts
+            active = get_active_user_safe()
+            accts = list_accounts()
+        except Exception:
+            pass
+        try:
+            html = templates.get_template("error.html").render(
                 request=request,
                 title="404",
                 message="Halaman tidak ditemukan.",
-                active_user=None,
-                accounts=[],
-            ),
-            status_code=404,
-        )
+                active_user=active,
+                accounts=accts,
+                webui_user=webui_user,
+            )
+            return HTMLResponse(html, status_code=404)
+        except Exception:
+            return HTMLResponse("<h1>404</h1><p>Halaman tidak ditemukan.</p>", status_code=404)
 
     @app.exception_handler(Exception)
     async def global_exception(request: Request, exc: Exception):
         message = public_error_message(
             exc, context=f"{request.method} {request.url.path}"
         )
-        return HTMLResponse(
-            templates.get_template("error.html").render(
+        webui_user = getattr(request.state, "webui_user", None)
+        active = None
+        accts = []
+        try:
+            from webui.deps import get_active_user_safe, list_accounts
+            active = get_active_user_safe()
+            accts = list_accounts()
+        except Exception:
+            pass
+        try:
+            html = templates.get_template("error.html").render(
                 request=request,
                 title="Error",
                 message=message,
-                active_user=None,
-                accounts=[],
-            ),
-            status_code=500,
-        )
+                active_user=active,
+                accounts=accts,
+                webui_user=webui_user,
+            )
+            return HTMLResponse(html, status_code=500)
+        except Exception:
+            # Last resort fallback so we never serve a raw ASGI error page
+            return HTMLResponse(
+                f"<h1>Error</h1><pre>{message}</pre><p><a href='/'>Back</a></p>",
+                status_code=500,
+                media_type="text/html",
+            )
 
     return app
 

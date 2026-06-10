@@ -17,6 +17,7 @@ from webui.users import (
     COOKIE_NAME, PROJECT_DIR, USERS_DIR,
     parse_session_token, get_user, user_dir,
 )
+from webui.cwd_lock import user_cwd
 
 # Routes accessible without auth:
 PUBLIC_PATHS = (
@@ -54,12 +55,12 @@ class WebUIAuthMiddleware(BaseHTTPMiddleware):
                 return RedirectResponse(url=f"/u/login?next={path}", status_code=303)
             return Response("Unauthorized", status_code=401)
 
-        # Authenticated → chdir to per-user dir, reload AuthInstance & BookmarkInstance
+        # Authenticated: use the shared user_cwd context (acquires lock, chdir, does reload inside)
+        # This prevents races with the background monitor_loop.
         udir = user_dir(user["username"])
         udir.mkdir(parents=True, exist_ok=True)
-        self._chdir_safely(udir)
 
-        # Make sure required user-local files/dirs exist
+        # Ensure seed files (using absolute paths)
         for fn, default in (
             ("refresh-tokens.json", "[]"),
         ):
@@ -68,29 +69,25 @@ class WebUIAuthMiddleware(BaseHTTPMiddleware):
                 p.write_text(default, encoding="utf-8")
         (udir / "decoy_data").mkdir(exist_ok=True)
 
-        # Reload singletons from this user's CWD
-        try:
-            from app.service.auth import AuthInstance
-            AuthInstance.reload_for_current_dir()
-        except Exception as e:
-            print(f"[middleware] AuthInstance reload err: {e}")
-        try:
-            from app.service.bookmark import BookmarkInstance
-            BookmarkInstance.reload_for_current_dir()
-        except Exception:
-            pass
-        try:
-            from app.service.decoy import DecoyInstance
-            DecoyInstance.reset_decoys()
-        except Exception:
-            pass
+        with user_cwd(user["username"]):
+            # user_cwd already did chdir + Auth reload. Do the others too for full compatibility.
+            try:
+                from app.service.bookmark import BookmarkInstance
+                BookmarkInstance.reload_for_current_dir()
+            except Exception:
+                pass
+            try:
+                from app.service.decoy import DecoyInstance
+                DecoyInstance.reset_decoys()
+            except Exception:
+                pass
 
-        # Stash webui user info for templates / handlers
-        request.state.webui_user = user
-        request.state.webui_user_dir = str(udir)
+            # Stash webui user info for templates / handlers (available for duration of request)
+            request.state.webui_user = user
+            request.state.webui_user_dir = str(udir)
 
-        response = await call_next(request)
-        return response
+            response = await call_next(request)
+            return response
 
     @staticmethod
     def _chdir_safely(p):

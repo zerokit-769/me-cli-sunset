@@ -4,7 +4,7 @@
 {% set fam = family.package_family %}
 <div class="card mb-4">
   <h1 class="text-xl font-bold">{{ fam.name }}</h1>
-  <div class="text-xs text-slate-400 mt-1 font-mono">{{ code }}</div>
+  <div class="text-xs text-slate-400 mt-1 code-wrap">{{ code }}</div>
   <div class="text-xs text-slate-400">Payment for: {{ fam.payment_for }} · Plan: {{ fam.plan_type }}</div>
 </div>
 

@@ -7,12 +7,16 @@ the lock longer than necessary.
 """
 import os
 import json
+import time
 import threading
 from pathlib import Path
 
 from webui.users import user_dir, PROJECT_DIR
 
 _lock = threading.Lock()
+_cache_lock = threading.Lock()
+_token_cache: dict[tuple[str, int], tuple[float, dict]] = {}
+_TOKEN_CACHE_TTL = 120  # seconds — avoid re-refreshing on every button tap
 
 
 class _UserCwd:
@@ -48,13 +52,48 @@ def user_cwd(username: str) -> _UserCwd:
     return _UserCwd(username)
 
 
-def get_user_tokens(username: str, msisdn: int) -> dict | None:
-    """Get fresh tokens for a specific MSISDN under a webui user.
+def list_user_accounts(username: str) -> list[dict]:
+    """Account metadata from refresh-tokens.json — no network calls."""
+    udir = user_dir(username)
+    rt_file = udir / "refresh-tokens.json"
+    if not rt_file.exists():
+        return []
+    try:
+        entries = json.loads(rt_file.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    results = []
+    for entry in entries:
+        msisdn = entry.get("number")
+        if not msisdn:
+            continue
+        results.append({
+            "number": int(msisdn),
+            "subscriber_id": entry.get("subscriber_id", ""),
+            "subscription_type": entry.get("subscription_type", ""),
+        })
+    return results
 
-    Acquires the CWD lock briefly to refresh tokens via AuthInstance,
-    then returns a *copy* of the tokens dict so callers can use it
-    without holding the lock.
-    """
+
+def invalidate_user_token_cache(username: str, msisdn: int | None = None) -> None:
+    with _cache_lock:
+        if msisdn is None:
+            keys = [k for k in _token_cache if k[0] == username]
+        else:
+            keys = [(username, int(msisdn))]
+        for key in keys:
+            _token_cache.pop(key, None)
+
+
+def get_user_tokens(username: str, msisdn: int, *, force: bool = False) -> dict | None:
+    """Get tokens for one MSISDN. Cached briefly to keep Telegram menus snappy."""
+    key = (username, int(msisdn))
+    if not force:
+        with _cache_lock:
+            hit = _token_cache.get(key)
+            if hit and (time.time() - hit[0]) < _TOKEN_CACHE_TTL:
+                return dict(hit[1])
+
     with user_cwd(username):
         from app.service.auth import AuthInstance
         try:
@@ -64,37 +103,20 @@ def get_user_tokens(username: str, msisdn: int) -> dict | None:
         user = AuthInstance.get_active_user()
         if not user or user.get("number") != msisdn:
             return None
-        return dict(user["tokens"])
+        tokens = dict(user["tokens"])
+
+    with _cache_lock:
+        _token_cache[key] = (time.time(), tokens)
+    return tokens
 
 
 def get_all_user_tokens(username: str) -> list[dict]:
-    """Get fresh tokens for ALL MSISDN accounts of a webui user.
-
-    Returns list of {number, subscriber_id, subscription_type, tokens: {...}}.
-    """
+    """Tokens for all accounts — uses per-number cache when possible."""
     results = []
-    udir = user_dir(username)
-    rt_file = udir / "refresh-tokens.json"
-    if not rt_file.exists():
-        return results
-
-    try:
-        entries = json.loads(rt_file.read_text(encoding="utf-8"))
-    except Exception:
-        return results
-
-    for entry in entries:
-        msisdn = entry.get("number")
-        if not msisdn:
-            continue
-        tokens = get_user_tokens(username, int(msisdn))
+    for entry in list_user_accounts(username):
+        tokens = get_user_tokens(username, entry["number"])
         if tokens:
-            results.append({
-                "number": int(msisdn),
-                "subscriber_id": entry.get("subscriber_id", ""),
-                "subscription_type": entry.get("subscription_type", ""),
-                "tokens": tokens,
-            })
+            results.append({**entry, "tokens": tokens})
     return results
 
 

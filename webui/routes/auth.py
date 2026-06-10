@@ -95,13 +95,21 @@ def accounts_page(request: Request):
 
 @router.post("/accounts/activate")
 def accounts_activate(request: Request, number: int = Form(...)):
-    AuthInstance.set_active_user(int(number))
+    try:
+        ok = AuthInstance.set_active_user(int(number))
+        if not ok:
+            return render(request, "error.html", title="Gagal aktifkan akun", message="Token tidak valid atau sudah tidak aktif. Hapus akun ini dan login ulang dengan OTP.")
+    except Exception as e:
+        return render(request, "error.html", title="Gagal aktifkan akun", message=str(e))
     return RedirectResponse(url="/", status_code=303)
 
 
 @router.post("/accounts/remove")
 def accounts_remove(request: Request, number: int = Form(...)):
-    AuthInstance.remove_refresh_token(int(number))
+    try:
+        AuthInstance.remove_refresh_token(int(number))
+    except Exception as e:
+        return render(request, "error.html", title="Gagal hapus akun", message=str(e))
     return RedirectResponse(url="/accounts", status_code=303)
 
 

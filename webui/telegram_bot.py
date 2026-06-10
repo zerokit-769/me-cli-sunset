@@ -8,13 +8,14 @@ Commands:
   /kuota — info pelanggan + kuota/paket aktif (nomor aktif)
   /saldo, /paket — alias ke /kuota
   /beli <option_code> — purchase package via balance
-  /unsub <quota_code> — unsubscribe a package
+  /unsub — unsubscribe paket aktif (pilih dari tombol)
   /history — last 10 transactions
 """
 import json
 import time
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
@@ -25,13 +26,23 @@ from webui.users import (
     authenticate, get_user_by_telegram, link_telegram, unlink_telegram,
     load_users, user_dir,
 )
-from webui.cwd_lock import get_user_tokens, get_all_user_tokens, get_api_key, user_cwd
+from webui.cwd_lock import (
+    get_user_tokens, get_all_user_tokens, get_api_key, user_cwd,
+    list_user_accounts,
+)
 from webui.helpers import format_benefit_quota_pair
 
 API_BASE = "https://api.telegram.org/bot{token}"
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 TG_MSG_MAX = 4096
 CALLBACK_DATA_MAX = 64
+
+EWALLET_METHODS = {
+    "ewallet_dana": "DANA",
+    "ewallet_shopeepay": "SHOPEEPAY",
+    "ewallet_gopay": "GOPAY",
+    "ewallet_ovo": "OVO",
+}
 
 
 def _esc(text) -> str:
@@ -233,9 +244,13 @@ class TelegramBot:
     def __init__(self, token: str):
         self.token = token
         self.base = API_BASE.format(token=token)
+        self._session = requests.Session()
         self._thread = None
         self._stop = threading.Event()
         self._offset = 0
+        self._offset_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tg-worker")
         self._pending_confirm: dict[int, dict] = {}
         # Conversation state per chat: {"step": str, "data": dict, "account_msisdn": int|None}
         self._states: dict[int, dict] = {}
@@ -257,15 +272,23 @@ class TelegramBot:
     ):
         if not chunks:
             return
-        back_kb = _kb_back_only() if back_menu else None
+        menu_kb = self._main_menu_keyboard() if back_menu else None
         if len(chunks) == 1:
-            kb = reply_markup or back_kb
-            self._reply(chat_id, msg_id, chunks[0], reply_markup=kb)
+            if back_menu and not reply_markup:
+                text = f"{chunks[0]}\n\n{self._main_menu_text(chat_id)}"
+                self._reply(chat_id, msg_id, text, reply_markup=menu_kb)
+            else:
+                kb = reply_markup or menu_kb
+                self._reply(chat_id, msg_id, chunks[0], reply_markup=kb)
             return
         self._reply(chat_id, msg_id, chunks[0], reply_markup=reply_markup)
         for part in chunks[1:-1]:
             self.send(chat_id, part)
-        self.send(chat_id, chunks[-1], reply_markup=back_kb)
+        if back_menu:
+            text = f"{chunks[-1]}\n\n{self._main_menu_text(chat_id)}"
+            self.send(chat_id, text, reply_markup=menu_kb)
+        else:
+            self.send(chat_id, chunks[-1], reply_markup=reply_markup)
 
     def _linked_username(self, chat_id: int) -> str | None:
         user = get_user_by_telegram(chat_id)
@@ -286,6 +309,11 @@ class TelegramBot:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
     def send(self, chat_id: int, text: str, parse_mode: str = "HTML", reply_markup=None) -> bool:
         payload = {
@@ -297,19 +325,25 @@ class TelegramBot:
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
         try:
-            r = requests.post(f"{self.base}/sendMessage", json=payload, timeout=15)
+            r = self._session.post(f"{self.base}/sendMessage", json=payload, timeout=15)
             return r.status_code == 200
         except Exception:
             return False
+
+    def _dispatch_update(self, update: dict):
+        try:
+            self._handle(update)
+        except Exception:
+            traceback.print_exc()
 
     def _poll_loop(self):
         backoff = 1
         while not self._stop.is_set():
             try:
-                r = requests.get(
+                r = self._session.get(
                     f"{self.base}/getUpdates",
-                    params={"offset": self._offset, "timeout": 30},
-                    timeout=35,
+                    params={"offset": self._offset, "timeout": 10},
+                    timeout=15,
                 )
                 if r.status_code != 200:
                     time.sleep(backoff)
@@ -318,11 +352,9 @@ class TelegramBot:
                 backoff = 1
                 data = r.json()
                 for update in data.get("result", []):
-                    self._offset = update["update_id"] + 1
-                    try:
-                        self._handle(update)
-                    except Exception:
-                        traceback.print_exc()
+                    with self._offset_lock:
+                        self._offset = update["update_id"] + 1
+                    self._executor.submit(self._dispatch_update, update)
             except requests.exceptions.Timeout:
                 continue
             except Exception:
@@ -346,7 +378,9 @@ class TelegramBot:
             return
 
         # Check for pending confirmation responses
-        if chat_id in self._pending_confirm:
+        with self._state_lock:
+            pending = chat_id in self._pending_confirm
+        if pending:
             self._handle_confirm(chat_id, text)
             return
 
@@ -381,6 +415,8 @@ class TelegramBot:
                 self._handle_family_code_input(chat_id, text)
             elif step == "await_option_code":
                 self._handle_option_code_input(chat_id, text)
+            elif step == "await_wallet_number":
+                self._handle_wallet_number_input(chat_id, text)
             elif get_user_by_telegram(chat_id):
                 self._send_main_menu(chat_id)
             else:
@@ -401,24 +437,29 @@ class TelegramBot:
         return user
 
     def _get_state(self, chat_id: int) -> dict:
-        if chat_id not in self._states:
-            active = self._load_active_msisdn(chat_id)
-            self._states[chat_id] = {
-                "step": None,
-                "data": {},
-                "active_msisdn": active,
-                "account_msisdn": active,
-            }
-        return self._states[chat_id]
+        with self._state_lock:
+            if chat_id not in self._states:
+                active = self._load_active_msisdn(chat_id)
+                self._states[chat_id] = {
+                    "step": None,
+                    "data": {},
+                    "active_msisdn": active,
+                    "account_msisdn": active,
+                }
+            return self._states[chat_id]
 
     def _clear_state(self, chat_id: int):
         """Clear purchase flow state; keep active_msisdn."""
         active = self._get_active_msisdn(chat_id)
-        self._states.pop(chat_id, None)
-        if active is not None:
-            st = self._get_state(chat_id)
-            st["active_msisdn"] = active
-            st["account_msisdn"] = active
+        with self._state_lock:
+            self._states.pop(chat_id, None)
+            if active is not None:
+                self._states[chat_id] = {
+                    "step": None,
+                    "data": {},
+                    "active_msisdn": active,
+                    "account_msisdn": active,
+                }
 
     def _load_active_msisdn(self, chat_id: int) -> int | None:
         uname = self._linked_username(chat_id)
@@ -432,57 +473,87 @@ class TelegramBot:
         except (TypeError, ValueError, OSError):
             return None
 
-    def _save_active_msisdn(self, chat_id: int, msisdn: int) -> bool:
+    def _username_for(self, chat_id: int) -> str | None:
+        user = get_user_by_telegram(chat_id)
+        return user["username"] if user else None
+
+    def _list_accounts(self, chat_id: int) -> list[dict]:
+        uname = self._username_for(chat_id)
+        if not uname:
+            return []
+        return list_user_accounts(uname)
+
+    def _account_meta(self, chat_id: int, msisdn: int) -> dict | None:
+        return next((a for a in self._list_accounts(chat_id) if a["number"] == msisdn), None)
+
+    def _get_account_with_tokens(self, chat_id: int, msisdn: int, *, force: bool = False) -> dict | None:
+        uname = self._username_for(chat_id)
+        if not uname:
+            return None
+        meta = self._account_meta(chat_id, msisdn)
+        if not meta:
+            return None
+        tokens = get_user_tokens(uname, msisdn, force=force)
+        if not tokens:
+            return None
+        return {**meta, "tokens": tokens}
+
+    def _prefetch_tokens(self, username: str, msisdn: int):
+        """Warm token cache in background — never block UI on number switch."""
+        try:
+            get_user_tokens(username, msisdn)
+        except Exception:
+            pass
+
+    def _save_active_msisdn(self, chat_id: int, msisdn: int, *, prefetch: bool = True) -> bool:
         uname = self._linked_username(chat_id)
         if not uname:
             return False
-        accounts = self._get_user_accounts(chat_id)
-        if not any(a["number"] == msisdn for a in accounts):
+        if not self._account_meta(chat_id, msisdn):
             return False
         udir = user_dir(uname)
         udir.mkdir(parents=True, exist_ok=True)
         (udir / "active.number").write_text(str(msisdn), encoding="utf-8")
-        try:
-            with user_cwd(uname):
-                from app.service.auth import AuthInstance
-                AuthInstance.set_active_user(msisdn)
-        except Exception:
-            pass
-        state = self._get_state(chat_id)
-        state["active_msisdn"] = msisdn
-        state["account_msisdn"] = msisdn
+        with self._state_lock:
+            state = self._states.setdefault(chat_id, {})
+            state["active_msisdn"] = msisdn
+            state["account_msisdn"] = msisdn
+        if prefetch:
+            self._executor.submit(self._prefetch_tokens, uname, msisdn)
         return True
 
     def _get_active_msisdn(self, chat_id: int) -> int | None:
-        state = self._get_state(chat_id)
-        raw = state.get("active_msisdn") or state.get("account_msisdn")
+        with self._state_lock:
+            state = self._states.get(chat_id)
+            raw = (state or {}).get("active_msisdn") or (state or {}).get("account_msisdn")
         if raw:
             return int(raw)
         loaded = self._load_active_msisdn(chat_id)
         if loaded:
-            state["active_msisdn"] = loaded
-            state["account_msisdn"] = loaded
+            with self._state_lock:
+                st = self._states.setdefault(chat_id, {})
+                st["active_msisdn"] = loaded
+                st["account_msisdn"] = loaded
             return loaded
-        accounts = self._get_user_accounts(chat_id)
+        accounts = self._list_accounts(chat_id)
         if len(accounts) == 1:
             self._save_active_msisdn(chat_id, accounts[0]["number"])
             return accounts[0]["number"]
         return None
 
-    def _get_active_account(self, chat_id: int) -> dict | None:
+    def _get_active_account(self, chat_id: int, *, force_tokens: bool = False) -> dict | None:
         msisdn = self._get_active_msisdn(chat_id)
         if not msisdn:
             return None
-        return next(
-            (a for a in self._get_user_accounts(chat_id) if a["number"] == msisdn),
-            None,
-        )
+        return self._get_account_with_tokens(chat_id, msisdn, force=force_tokens)
 
     def _require_active_account(self, chat_id: int, msg_id: int | None = None) -> dict | None:
-        acc = self._get_active_account(chat_id)
-        if acc:
-            return acc
-        accounts = self._get_user_accounts(chat_id)
+        msisdn = self._get_active_msisdn(chat_id)
+        if msisdn:
+            acc = self._get_account_with_tokens(chat_id, msisdn)
+            if acc:
+                return acc
+        accounts = self._list_accounts(chat_id)
         if not accounts:
             self._reply(chat_id, msg_id, "Tidak ada nomor MyXL terdaftar.")
             return None
@@ -492,15 +563,15 @@ class TelegramBot:
     def _main_menu_text(self, chat_id: int) -> str:
         active = self._get_active_msisdn(chat_id)
         if active:
-            acc = self._get_active_account(chat_id)
-            st = _esc(acc.get("subscription_type", "")) if acc else ""
+            meta = self._account_meta(chat_id, active)
+            st = _esc(meta.get("subscription_type", "")) if meta else ""
             return (
                 f"<b>Menu utama</b>\n"
                 f"📱 Nomor aktif: <code>{active}</code>"
                 + (f" ({st})" if st else "")
                 + "\n\nPilih menu:"
             )
-        accounts = self._get_user_accounts(chat_id)
+        accounts = self._list_accounts(chat_id)
         if len(accounts) > 1:
             return (
                 "<b>Menu utama</b>\n"
@@ -509,16 +580,8 @@ class TelegramBot:
             )
         return "<b>Menu utama</b>\n\nPilih menu:"
 
-    def _get_user_accounts(self, chat_id: int) -> list[dict]:
-        user = get_user_by_telegram(chat_id)
-        if not user:
-            return []
-        return get_all_user_tokens(user["username"])
-
-    # ── Main Menu with Inline Keyboard ──
-
-    def _send_main_menu(self, chat_id: int, msg_id: int | None = None):
-        kb = {
+    def _main_menu_keyboard(self) -> dict:
+        return {
             "inline_keyboard": [
                 [{"text": "📱 Nomor", "callback_data": "menu:nomor"}],
                 [{"text": "📊 Kuota & Saldo", "callback_data": "menu:kuota"}],
@@ -533,7 +596,40 @@ class TelegramBot:
                 [{"text": "🔌 Unlink", "callback_data": "menu:unlink"}],
             ]
         }
-        self._reply(chat_id, msg_id, self._main_menu_text(chat_id), reply_markup=kb)
+
+    def _return_main_menu(
+        self,
+        chat_id: int,
+        msg_id: int | None = None,
+        *,
+        clear_state: bool = False,
+        notice: str | None = None,
+    ):
+        if clear_state:
+            self._clear_state(chat_id)
+        with self._state_lock:
+            self._pending_confirm.pop(chat_id, None)
+        text = self._main_menu_text(chat_id)
+        if notice:
+            text = f"{notice}\n\n{text}"
+        self._reply(chat_id, msg_id, text, reply_markup=self._main_menu_keyboard())
+
+    def _finish_action(self, chat_id: int, msg_id: int | None, result: str):
+        """Terminal action: show result text with full main menu keyboard."""
+        text = f"{result}\n\n{self._main_menu_text(chat_id)}"
+        self._reply(chat_id, msg_id, text, reply_markup=self._main_menu_keyboard())
+
+    def _get_user_accounts(self, chat_id: int) -> list[dict]:
+        """Full accounts with tokens — use only when API access is required."""
+        uname = self._username_for(chat_id)
+        if not uname:
+            return []
+        return get_all_user_tokens(uname)
+
+    # ── Main Menu with Inline Keyboard ──
+
+    def _send_main_menu(self, chat_id: int, msg_id: int | None = None):
+        self._return_main_menu(chat_id, msg_id)
 
     def _cmd_nomor(self, chat_id: int, args: list):
         if not self._require_linked(chat_id):
@@ -541,7 +637,7 @@ class TelegramBot:
         self._send_number_menu(chat_id, None)
 
     def _send_number_menu(self, chat_id: int, msg_id: int | None, hint: str | None = None):
-        accounts = self._get_user_accounts(chat_id)
+        accounts = self._list_accounts(chat_id)
         if not accounts:
             self._reply(chat_id, msg_id, "Tidak ada nomor MyXL terdaftar.")
             return
@@ -570,7 +666,11 @@ class TelegramBot:
 
         # Answer callback immediately to remove loading state
         try:
-            requests.post(f"{self.base}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=5)
+            self._session.post(
+                f"{self.base}/answerCallbackQuery",
+                json={"callback_query_id": cb["id"]},
+                timeout=5,
+            )
         except Exception:
             pass
 
@@ -583,9 +683,10 @@ class TelegramBot:
             self._handle_purchase_callback(chat_id, msg_id, data)
         elif data.startswith("confirm:"):
             self._handle_confirm_action(chat_id, msg_id, data)
+        elif data.startswith("unsub:"):
+            self._handle_unsub_callback(chat_id, msg_id, data)
         elif data.startswith("cancel"):
-            self._pending_confirm.pop(chat_id, None)
-            self._edit_message(chat_id, msg_id, "Dibatalkan.")
+            self._return_main_menu(chat_id, msg_id, clear_state=True, notice="Dibatalkan.")
 
     def _edit_message(self, chat_id: int, msg_id: int, text: str, reply_markup=None):
         payload = {
@@ -598,7 +699,7 @@ class TelegramBot:
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
         try:
-            requests.post(f"{self.base}/editMessageText", json=payload, timeout=10)
+            self._session.post(f"{self.base}/editMessageText", json=payload, timeout=10)
         except Exception:
             pass
 
@@ -610,18 +711,12 @@ class TelegramBot:
             try:
                 msisdn = int(data.split(":", 2)[2])
             except (IndexError, ValueError):
-                self._edit_message(chat_id, msg_id, "Nomor tidak valid.")
+                self._finish_action(chat_id, msg_id, "Nomor tidak valid.")
                 return
             if not self._save_active_msisdn(chat_id, msisdn):
-                self._edit_message(chat_id, msg_id, "Gagal menyimpan nomor aktif.")
+                self._finish_action(chat_id, msg_id, "Gagal menyimpan nomor aktif.")
                 return
-            acc = self._get_active_account(chat_id)
-            st = _esc(acc.get("subscription_type", "")) if acc else ""
-            self._edit_message(
-                chat_id, msg_id,
-                f"✅ Nomor aktif: <code>{msisdn}</code>" + (f" ({st})" if st else ""),
-            )
-            self._send_main_menu(chat_id)
+            self._send_main_menu(chat_id, msg_id)
 
     def _handle_menu_action(self, chat_id: int, msg_id: int, action: str):
         user = self._require_linked(chat_id)
@@ -664,16 +759,13 @@ class TelegramBot:
                     lines.append(f"{emoji} {title} · {price}")
             except Exception as e:
                 lines.append(_tg_err(e))
-            self._edit_message(chat_id, msg_id, "\n".join(lines), reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, "\n".join(lines))
 
         elif action == "unsub":
-            self._edit_message(chat_id, msg_id,
-                "Untuk stop paket, kirim:\n<code>/unsub</code> diikuti kode paket dari aplikasi XL.",
-                reply_markup=_kb_back_menu([[{"text": "❌ Batal", "callback_data": "cancel"}]]),
-            )
+            self._show_unsub_package_menu(chat_id, msg_id)
 
         elif action == "help":
-            self._edit_message(chat_id, msg_id, (
+            self._finish_action(chat_id, msg_id, (
                 "<b>Daftar Command</b>\n\n"
                 "/link &lt;user&gt; &lt;pass&gt; — Link akun WebUI\n"
                 "/unlink — Hapus link\n"
@@ -682,22 +774,142 @@ class TelegramBot:
                 "/kuota — Info pelanggan + kuota/paket aktif\n"
                 "/saldo · /paket — sama dengan /kuota\n"
                 "/beli &lt;option_code&gt; — Beli paket\n"
-                "/unsub &lt;quota_code&gt; — Unsubscribe\n"
+                "/unsub — Unsubscribe paket aktif\n"
                 "/history — Riwayat (nomor aktif)\n\n"
                 "Semua menu memakai <b>nomor aktif</b> sampai diganti di 📱 Nomor."
-            ), reply_markup=_kb_back_only())
+            ))
 
         elif action == "unlink":
             user = get_user_by_telegram(chat_id)
             if user:
                 unlink_telegram(user["username"])
-                self._edit_message(chat_id, msg_id, f"Akun <b>{user['username']}</b> berhasil di-unlink.")
+                self._finish_action(chat_id, msg_id, f"Akun <b>{user['username']}</b> berhasil di-unlink.")
             else:
-                self._edit_message(chat_id, msg_id, "Tidak ada akun yang di-link.")
+                self._finish_action(chat_id, msg_id, "Tidak ada akun yang di-link.")
+
+    def _fetch_active_quotas(self, api_key: str, acc: dict) -> list[dict]:
+        from app.client.engsel import send_api_request
+        res = send_api_request(
+            api_key, "api/v8/packages/quota-details",
+            {"is_enterprise": False, "lang": "en", "family_member_id": ""},
+            acc["tokens"]["id_token"], "POST",
+        )
+        if not isinstance(res, dict):
+            return []
+        if res.get("status") != "SUCCESS" and str(res.get("code")) != "000":
+            return []
+        return (res.get("data") or {}).get("quotas") or []
+
+    def _show_unsub_package_menu(self, chat_id: int, msg_id: int | None):
+        acc = self._require_active_account(chat_id, msg_id)
+        if not acc:
+            return
+
+        self._reply(chat_id, msg_id, "Mengambil paket aktif...")
+        api_key = get_api_key()
+
+        try:
+            quotas = self._fetch_active_quotas(api_key, acc)
+        except Exception as e:
+            self._finish_action(chat_id, msg_id, _tg_err(e))
+            return
+
+        if not quotas:
+            self._finish_action(
+                chat_id, msg_id,
+                f"<b>🗑️ Unsubscribe</b>\n📱 <code>{acc['number']}</code>\n\n"
+                "Tidak ada paket aktif.",
+            )
+            return
+
+        state = self._get_state(chat_id)
+        unsub_map: dict[str, str] = {}
+        buttons = []
+        for i, q in enumerate(quotas[:12]):
+            name = (q.get("name") or "Paket").strip()
+            exp = _format_date_dmY(q.get("expired_at"))
+            label = f"{name} · exp {exp}" if exp != "-" else name
+            if len(label) > 60:
+                label = label[:57] + "…"
+            unsub_map[str(i)] = json.dumps({
+                "quota_code": q.get("quota_code", ""),
+                "quota_name": name,
+                "product_domain": q.get("product_domain", ""),
+                "product_subscription_type": q.get("product_subscription_type", ""),
+            }, separators=(",", ":"))
+            buttons.append([{"text": label, "callback_data": f"unsub:pick:{i}"}])
+
+        state["unsub_map"] = unsub_map
+        buttons.append([{"text": "« Menu utama", "callback_data": "menu:home"}])
+        self._reply(
+            chat_id, msg_id,
+            f"<b>🗑️ Unsubscribe Paket</b>\n"
+            f"📱 <code>{acc['number']}</code>\n\n"
+            "Pilih paket aktif yang ingin di-stop:",
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    def _handle_unsub_callback(self, chat_id: int, msg_id: int, data: str):
+        if data == "unsub:list":
+            self._show_unsub_package_menu(chat_id, msg_id)
+            return
+
+        if not data.startswith("unsub:pick:"):
+            self._finish_action(chat_id, msg_id, "Aksi unsubscribe tidak dikenal.")
+            return
+
+        idx = data.split(":", 2)[2]
+        state = self._get_state(chat_id)
+        raw = (state.get("unsub_map") or {}).get(idx)
+        if not raw:
+            self._finish_action(chat_id, msg_id, "Paket tidak valid atau sudah expired.")
+            return
+
+        try:
+            info = json.loads(raw)
+        except json.JSONDecodeError:
+            self._finish_action(chat_id, msg_id, "Data paket rusak.")
+            return
+
+        msisdn = self._get_active_msisdn(chat_id)
+        if not msisdn:
+            self._require_active_account(chat_id, msg_id)
+            return
+
+        acc = self._get_account_with_tokens(chat_id, msisdn)
+        if not acc:
+            self._finish_action(chat_id, msg_id, "Gagal memuat sesi nomor aktif.")
+            return
+
+        quota_name = info.get("quota_name") or "Paket"
+        with self._state_lock:
+            self._pending_confirm[chat_id] = {
+                "action": "unsub",
+                "quota_code": info.get("quota_code", ""),
+                "quota_name": quota_name,
+                "product_domain": info.get("product_domain", ""),
+                "product_subscription_type": info.get("product_subscription_type", ""),
+                "account": acc,
+                "expires": time.time() + 120,
+            }
+
+        kb = _kb_back_menu([
+            [
+                {"text": "✅ Ya, Unsubscribe", "callback_data": "confirm:unsub"},
+                {"text": "❌ Batal", "callback_data": "unsub:list"},
+            ],
+        ])
+        self._edit_message(
+            chat_id, msg_id,
+            f"<b>Konfirmasi Unsubscribe</b>\n\n"
+            f"📦 {_esc(quota_name)}\n"
+            f"📱 <code>{acc['number']}</code>\n\n"
+            "Yakin ingin stop paket ini?",
+            reply_markup=kb,
+        )
 
     def _execute_kuota_for_account(self, chat_id: int, msg_id: int | None, msisdn: int):
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, msisdn)
         if not acc:
             self._reply(chat_id, msg_id, "Nomor tidak ditemukan.")
             return
@@ -708,7 +920,7 @@ class TelegramBot:
             chunks = _chunk_lines_for_telegram(lines)
             self._send_chunks(chat_id, msg_id, chunks)
         except Exception as e:
-            self._reply(chat_id, msg_id, _tg_err(e), reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, _tg_err(e))
 
     def _handle_family_code_input(self, chat_id: int, family_code: str):
         state = self._get_state(chat_id)
@@ -718,8 +930,7 @@ class TelegramBot:
             return
         state["account_msisdn"] = msisdn
 
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, msisdn)
         if not acc:
             self.send(chat_id, "Nomor tidak valid.")
             self._clear_state(chat_id)
@@ -792,7 +1003,7 @@ class TelegramBot:
         state["step"] = "purchase_category"
 
         kb = _kb_back_menu([
-            [{"text": "🔥 Hot Deals", "callback_data": "purchase:cat:hot"}],
+            [{"text": "🔥🔥 Hot-2", "callback_data": "purchase:cat:hot"}],
             [{"text": "👨‍👩‍👧 By Family Code", "callback_data": "purchase:cat:family"}],
             [{"text": "🎯 By Option Code", "callback_data": "purchase:cat:option"}],
             [{"text": "🔖 Bookmark", "callback_data": "purchase:cat:bookmark"}],
@@ -817,9 +1028,7 @@ class TelegramBot:
             cat = parts[2] if len(parts) > 2 else ""
             self._handle_purchase_category(chat_id, msg_id, cat)
         elif sub == "cancel":
-            self._clear_state(chat_id)
-            self._edit_message(chat_id, msg_id, "Dibatalkan.")
-            self._send_main_menu(chat_id)
+            self._return_main_menu(chat_id, msg_id, clear_state=True, notice="Dibatalkan.")
         elif sub == "pkg":
             raw = parts[2] if len(parts) > 2 else ""
             option_code = self._resolve_pkg_code(state, raw)
@@ -829,6 +1038,15 @@ class TelegramBot:
             self._handle_payment_mode(chat_id, msg_id, mode)
         elif sub == "pay":
             method = parts[2] if len(parts) > 2 else ""
+            if state.get("pending_hot") and method in ("ewallet_dana", "ewallet_ovo"):
+                state["pending_hot_method"] = method
+                state["step"] = "await_wallet_number"
+                label = "DANA" if method == "ewallet_dana" else "OVO"
+                self._edit_message(
+                    chat_id, msg_id,
+                    f"Masukkan nomor <b>{label}</b> (contoh: <code>08123456789</code>):",
+                )
+                return
             self._handle_payment_method(chat_id, msg_id, method)
         elif sub == "dcy":
             try:
@@ -849,7 +1067,7 @@ class TelegramBot:
                 idx = -1
             self._handle_bookmark_selected(chat_id, msg_id, idx)
         else:
-            self._edit_message(chat_id, msg_id, f"Unknown purchase action: {data}")
+            self._finish_action(chat_id, msg_id, f"Unknown purchase action: {data}")
 
     def _handle_purchase_category(self, chat_id: int, msg_id: int, category: str):
         state = self._get_state(chat_id)
@@ -870,38 +1088,70 @@ class TelegramBot:
         elif category == "bookmark":
             self._show_bookmark_packages(chat_id, msg_id)
 
-    def _show_hot_deals(self, chat_id: int, msg_id: int):
-        import json
-        from pathlib import Path
-
-        hot_file = Path(__file__).resolve().parents[2] / "hot_data" / "hot2.json"
+    def _load_hot2_bundles(self) -> list[dict]:
+        hot_file = PROJECT_DIR / "hot_data" / "hot2.json"
         if not hot_file.exists():
-            self._edit_message(chat_id, msg_id, "Hot deals data tidak tersedia.")
-            self._clear_state(chat_id)
-            return
-
+            return []
         try:
-            bundles = json.loads(hot_file.read_text(encoding="utf-8"))
+            return json.loads(hot_file.read_text(encoding="utf-8"))
         except Exception:
-            self._edit_message(chat_id, msg_id, "Gagal baca hot deals.")
-            self._clear_state(chat_id)
-            return
+            return []
 
+    def _show_hot_deals(self, chat_id: int, msg_id: int):
+        bundles = self._load_hot2_bundles()
         if not bundles:
-            self._edit_message(chat_id, msg_id, "Tidak ada hot deals.")
-            self._clear_state(chat_id)
+            self._return_main_menu(
+                chat_id, msg_id, clear_state=True,
+                notice="Belum ada data Hot-2. Cek file hot_data/hot2.json.",
+            )
             return
 
         buttons = []
-        for i, bundle in enumerate(bundles[:6]):
-            name = bundle.get("name", f"Bundle {i+1}")
-            price = bundle.get("price", "")
-            buttons.append([{"text": f"🔥 {name} {price}", "callback_data": f"purchase:hot:{i}"}])
+        for i, bundle in enumerate(bundles):
+            name = (bundle.get("name") or f"Bundle {i + 1}").strip()
+            price = (bundle.get("price") or "").strip()
+            label = f"🔥 {name} · {price}" if price else f"🔥 {name}"
+            if len(label) > 60:
+                label = label[:57] + "…"
+            buttons.append([{"text": label, "callback_data": f"purchase:hot:{i}"}])
 
         buttons.append([{"text": "❌ Batal", "callback_data": "purchase:cancel"}])
         buttons.append([{"text": "« Menu utama", "callback_data": "menu:home"}])
         kb = {"inline_keyboard": buttons}
-        self._edit_message(chat_id, msg_id, "Pilih Hot Deal:", reply_markup=kb)
+        self._edit_message(
+            chat_id, msg_id,
+            "<b>🔥🔥 Hot-2</b>\n"
+            "Bundle gabungan payment — pilih paket:",
+            reply_markup=kb,
+        )
+
+    def _show_hot_payment_menu(self, chat_id: int, msg_id: int, bundle: dict, msisdn: int):
+        name = _esc(bundle.get("name", "-"))
+        price = _esc(bundle.get("price", ""))
+        detail = _esc((bundle.get("detail") or "").strip())
+        n_sub = len(bundle.get("packages") or [])
+        header = (
+            f"<b>🔥 Hot-2 Bundle</b>\n\n"
+            f"📦 {name}\n"
+            f"💰 {price}\n"
+            f"📱 <code>{msisdn}</code>\n"
+            f"📎 {n_sub} sub-package(s)"
+        )
+        if detail:
+            header += f"\n\n{detail}"
+        header += "\n\nPilih metode pembayaran:"
+
+        kb = _kb_back_menu([
+            [{"text": "💳 Balance (Pulsa)", "callback_data": "purchase:pay:balance"}],
+            [{"text": "📱 QRIS", "callback_data": "purchase:pay:qris"}],
+            [{"text": "💚 DANA", "callback_data": "purchase:pay:ewallet_dana"}],
+            [{"text": "🧡 ShopeePay", "callback_data": "purchase:pay:ewallet_shopeepay"}],
+            [{"text": "💙 GoPay", "callback_data": "purchase:pay:ewallet_gopay"}],
+            [{"text": "💜 OVO", "callback_data": "purchase:pay:ewallet_ovo"}],
+            [{"text": "« Daftar Hot-2", "callback_data": "purchase:cat:hot"}],
+            [{"text": "❌ Batal", "callback_data": "purchase:cancel"}],
+        ])
+        self._edit_message(chat_id, msg_id, header, reply_markup=kb)
 
     def _handle_package_selected(self, chat_id: int, msg_id: int | None, option_code: str):
         state = self._get_state(chat_id)
@@ -911,10 +1161,9 @@ class TelegramBot:
             return
         state["account_msisdn"] = msisdn
 
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, msisdn)
         if not acc:
-            self._reply(chat_id, msg_id, "Nomor tidak valid.")
+            self._finish_action(chat_id, msg_id, "Nomor tidak valid.")
             return
 
         api_key = get_api_key()
@@ -922,11 +1171,11 @@ class TelegramBot:
             from app.client.engsel import get_package
             pkg = get_package(api_key, acc["tokens"], option_code)
         except Exception as e:
-            self._reply(chat_id, msg_id, _tg_err(e))
+            self._finish_action(chat_id, msg_id, _tg_err(e))
             return
 
         if not pkg:
-            self._reply(chat_id, msg_id, f"Paket tidak ditemukan.")
+            self._finish_action(chat_id, msg_id, "Paket tidak ditemukan.")
             return
 
         opt = pkg.get("package_option", {})
@@ -971,7 +1220,7 @@ class TelegramBot:
         """Decoy: langsung list slot default (decoy-*.json) di akun user."""
         uname = self._linked_username(chat_id)
         if not uname:
-            self._edit_message(chat_id, msg_id, "Akun belum di-link.")
+            self._finish_action(chat_id, msg_id, "Akun belum di-link.")
             return
 
         with user_cwd(uname):
@@ -1034,13 +1283,13 @@ class TelegramBot:
                 )
             elif pending_hot:
                 bundle = pending_hot.get("bundle") or {}
-                self._show_payment_mode_menu(
-                    chat_id, msg_id,
-                    f"<b>Hot Deal</b>\n\n📦 {_esc(bundle.get('name', '-'))}\n"
-                    f"💰 {_esc(bundle.get('price', ''))}\n📱 {pending_hot.get('msisdn', '')}",
-                )
+                msisdn = pending_hot.get("msisdn") or self._get_active_msisdn(chat_id)
+                if bundle and msisdn:
+                    self._show_hot_payment_menu(chat_id, msg_id, bundle, int(msisdn))
+                else:
+                    self._finish_action(chat_id, msg_id, "Tidak ada transaksi pending.")
             else:
-                self._edit_message(chat_id, msg_id, "Tidak ada transaksi pending.")
+                self._finish_action(chat_id, msg_id, "Tidak ada transaksi pending.")
             return
         if mode == "n":
             self._show_normal_payment_menu(chat_id, msg_id)
@@ -1058,35 +1307,34 @@ class TelegramBot:
                 return
             self._show_decoy_payment_menu(chat_id, msg_id)
             return
-        self._edit_message(chat_id, msg_id, "Mode pembayaran tidak dikenal.")
+        self._finish_action(chat_id, msg_id, "Mode pembayaran tidak dikenal.")
 
     def _handle_decoy_payment(self, chat_id: int, msg_id: int, idx: int):
         state = self._get_state(chat_id)
         raw = (state.get("dcy_map") or {}).get(str(idx))
         if not raw:
-            self._edit_message(chat_id, msg_id, "Pilihan decoy tidak valid.")
+            self._finish_action(chat_id, msg_id, "Pilihan decoy tidak valid.")
             return
         try:
             choice = json.loads(raw)
         except json.JSONDecodeError:
-            self._edit_message(chat_id, msg_id, "Data decoy rusak.")
+            self._finish_action(chat_id, msg_id, "Data decoy rusak.")
             return
 
         pending = state.get("pending_purchase")
         if not pending:
-            self._edit_message(chat_id, msg_id, "Tidak ada paket pending.")
+            self._finish_action(chat_id, msg_id, "Tidak ada paket pending.")
             return
 
         msisdn = pending["msisdn"]
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, msisdn)
         if not acc:
-            self._edit_message(chat_id, msg_id, "Nomor tidak valid.")
+            self._finish_action(chat_id, msg_id, "Nomor tidak valid.")
             return
 
         uname = self._linked_username(chat_id)
         if not uname:
-            self._edit_message(chat_id, msg_id, "Akun belum di-link.")
+            self._finish_action(chat_id, msg_id, "Akun belum di-link.")
             return
 
         api_key = get_api_key()
@@ -1112,9 +1360,9 @@ class TelegramBot:
                 text = f"✅ {_esc(msg)}"
             else:
                 text = f"❌ {_esc(msg)}"
-            self._edit_message(chat_id, msg_id, text, reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, text)
         except Exception as e:
-            self._edit_message(chat_id, msg_id, _tg_err(e), reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, _tg_err(e))
         self._clear_state(chat_id)
 
     def _handle_payment_method(self, chat_id: int, msg_id: int, method: str):
@@ -1122,23 +1370,23 @@ class TelegramBot:
         pending_hot = state.get("pending_hot")
         if pending_hot:
             self._execute_hot_purchase(chat_id, msg_id, method, pending_hot)
-            self._clear_state(chat_id)
             return
 
         pending = state.get("pending_purchase")
         if not pending:
-            self._edit_message(chat_id, msg_id, "Tidak ada transaksi pending.")
-            self._clear_state(chat_id)
+            self._return_main_menu(
+                chat_id, msg_id, clear_state=True,
+                notice="Tidak ada transaksi pending.",
+            )
             return
 
         msisdn = pending["msisdn"]
         pkg = pending["pkg"]
         opt = pkg.get("package_option", {})
 
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, msisdn)
         if not acc:
-            self._edit_message(chat_id, msg_id, "Nomor tidak valid.")
+            self._finish_action(chat_id, msg_id, "Nomor tidak valid.")
             return
 
         api_key = get_api_key()
@@ -1147,9 +1395,9 @@ class TelegramBot:
 
         try:
             msg = self._settle_single_package(api_key, acc["tokens"], pkg, method)
-            self._edit_message(chat_id, msg_id, msg, reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, msg)
         except Exception as e:
-            self._edit_message(chat_id, msg_id, _tg_err(e), reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, _tg_err(e))
 
         self._clear_state(chat_id)
 
@@ -1201,38 +1449,60 @@ class TelegramBot:
         state = self._get_state(chat_id)
         msisdn = self._get_active_msisdn(chat_id)
         if not msisdn or idx < 0:
-            self._edit_message(chat_id, msg_id, "Pilihan tidak valid.")
+            self._finish_action(chat_id, msg_id, "Pilihan tidak valid.")
             return
 
-        hot_file = PROJECT_DIR / "hot_data" / "hot2.json"
-        try:
-            bundles = json.loads(hot_file.read_text(encoding="utf-8"))
-        except Exception:
-            self._edit_message(chat_id, msg_id, "Gagal baca hot deals.")
+        bundles = self._load_hot2_bundles()
+        if not bundles:
+            self._finish_action(chat_id, msg_id, "Data Hot-2 tidak tersedia.")
             return
 
         if idx >= len(bundles):
-            self._edit_message(chat_id, msg_id, "Hot deal tidak ditemukan.")
+            self._finish_action(chat_id, msg_id, "Bundle Hot-2 tidak ditemukan.")
             return
 
         bundle = bundles[idx]
+        if not bundle.get("packages"):
+            self._finish_action(chat_id, msg_id, "Bundle ini tidak punya sub-package.")
+            return
+
         state.pop("pending_purchase", None)
+        state.pop("pending_hot_method", None)
         state["pending_hot"] = {"bundle": bundle, "idx": idx, "msisdn": msisdn}
-        state["step"] = "select_payment_mode"
-        name = _esc(bundle.get("name", "Hot deal"))
-        price = _esc(bundle.get("price", ""))
-        self._show_payment_mode_menu(
-            chat_id, msg_id,
-            f"<b>Hot Deal</b>\n\n📦 {name}\n💰 {price}\n📱 {msisdn}",
-        )
+        state["step"] = "select_hot_payment"
+        self._show_hot_payment_menu(chat_id, msg_id, bundle, msisdn)
+
+    def _handle_wallet_number_input(self, chat_id: int, wallet_number: str):
+        wallet_number = wallet_number.strip()
+        if (
+            not wallet_number.startswith("08")
+            or not wallet_number.isdigit()
+            or not (10 <= len(wallet_number) <= 13)
+        ):
+            self.send(
+                chat_id,
+                "Nomor tidak valid. Harus dimulai <code>08</code>, 10–13 digit.\n"
+                "Coba lagi atau tap Batal di menu sebelumnya.",
+            )
+            return
+
+        state = self._get_state(chat_id)
+        method = state.pop("pending_hot_method", "")
+        pending_hot = state.get("pending_hot")
+        if not pending_hot or not method:
+            self._return_main_menu(chat_id, notice="Sesi pembayaran expired.")
+            return
+
+        pending_hot["wallet_number"] = wallet_number
+        state["step"] = "select_hot_payment"
+        self._execute_hot_purchase(chat_id, None, method, pending_hot)
 
     def _execute_hot_purchase(self, chat_id: int, msg_id: int, method: str, pending_hot: dict):
         msisdn = pending_hot.get("msisdn")
         bundle = pending_hot.get("bundle") or {}
-        accounts = self._get_user_accounts(chat_id)
-        acc = next((a for a in accounts if a["number"] == msisdn), None)
+        acc = self._get_account_with_tokens(chat_id, int(msisdn)) if msisdn else None
         if not acc:
-            self._edit_message(chat_id, msg_id, "Nomor tidak valid.")
+            self._finish_action(chat_id, msg_id, "Nomor tidak valid.")
             return
 
         api_key = get_api_key()
@@ -1253,7 +1523,7 @@ class TelegramBot:
                     p.get("is_enterprise", False), p.get("migration_type", "NONE"),
                 )
                 if not pkg_detail:
-                    self._edit_message(chat_id, msg_id, "Gagal fetch detail paket hot deal.")
+                    self._finish_action(chat_id, msg_id, "Gagal fetch detail paket hot deal.")
                     return
                 opt = pkg_detail["package_option"]
                 items.append(PaymentItem(
@@ -1266,7 +1536,7 @@ class TelegramBot:
                 ))
 
             if not items:
-                self._edit_message(chat_id, msg_id, "Hot deal tidak punya paket.")
+                self._finish_action(chat_id, msg_id, "Hot deal tidak punya paket.")
                 return
 
             payment_for = bundle.get("payment_for", "BUY_PACKAGE")
@@ -1276,7 +1546,8 @@ class TelegramBot:
             if overwrite == -1:
                 overwrite = items[amount_idx]["item_price"] if amount_idx != -1 else items[-1]["item_price"]
 
-            name = _esc(bundle.get("name", "Hot deal"))
+            name = _esc(bundle.get("name", "Hot-2"))
+            wallet_number = pending_hot.get("wallet_number", "")
 
             if method == "qris":
                 tx = settlement_qris(
@@ -1284,19 +1555,37 @@ class TelegramBot:
                     overwrite, token_idx, amount_idx,
                 )
                 if not tx or not isinstance(tx, str):
-                    self._edit_message(chat_id, msg_id, "❌ QRIS hot deal gagal.")
+                    self._finish_action(chat_id, msg_id, "❌ QRIS Hot-2 gagal.")
                     return
                 qris_code = get_qris_code(api_key, acc["tokens"], tx)
                 if qris_code:
-                    self._edit_message(
+                    self._finish_action(
                         chat_id, msg_id,
                         f"✅ QRIS <b>{name}</b>\n<code>{_esc(qris_code)}</code>",
-                        reply_markup=_kb_back_only(),
                     )
                 else:
-                    self._edit_message(
-                        chat_id, msg_id, f"✅ QRIS tx dibuat, kode QR tidak tersedia.",
-                        reply_markup=_kb_back_only(),
+                    self._finish_action(
+                        chat_id, msg_id,
+                        "✅ QRIS tx dibuat, kode QR tidak tersedia.",
+                    )
+                return
+
+            if method in EWALLET_METHODS:
+                from app.client.purchase.ewallet import settlement_multipayment
+                res = settlement_multipayment(
+                    api_key, acc["tokens"], items, wallet_number,
+                    EWALLET_METHODS[method], payment_for, False,
+                    overwrite, token_idx, amount_idx,
+                )
+                if isinstance(res, dict) and res.get("status") == "SUCCESS":
+                    self._finish_action(
+                        chat_id, msg_id,
+                        f"✅ Hot-2 <b>{name}</b> berhasil via {EWALLET_METHODS[method]}!",
+                    )
+                else:
+                    err = res.get("message", "") if isinstance(res, dict) else str(res or "")
+                    self._finish_action(
+                        chat_id, msg_id, f"❌ Gagal: {_esc(err or 'Unknown')}",
                     )
                 return
 
@@ -1305,23 +1594,23 @@ class TelegramBot:
                 overwrite, token_idx, amount_idx,
             )
             if isinstance(res, dict) and res.get("status") == "SUCCESS":
-                self._edit_message(
-                    chat_id, msg_id, f"✅ Hot deal <b>{name}</b> berhasil!",
-                    reply_markup=_kb_back_only(),
+                self._finish_action(
+                    chat_id, msg_id, f"✅ Hot-2 <b>{name}</b> berhasil!",
                 )
             else:
                 err = res.get("message", "") if isinstance(res, dict) else ""
-                self._edit_message(
+                self._finish_action(
                     chat_id, msg_id, f"❌ Gagal: {_esc(err or 'Unknown')}",
-                    reply_markup=_kb_back_only(),
                 )
         except Exception as e:
-            self._edit_message(chat_id, msg_id, _tg_err(e), reply_markup=_kb_back_only())
+            self._finish_action(chat_id, msg_id, _tg_err(e))
+
+        self._clear_state(chat_id)
 
     def _show_bookmark_packages(self, chat_id: int, msg_id: int):
         uname = self._linked_username(chat_id)
         if not uname:
-            self._edit_message(chat_id, msg_id, "Akun belum di-link.")
+            self._finish_action(chat_id, msg_id, "Akun belum di-link.")
             return
 
         with user_cwd(uname):
@@ -1330,8 +1619,10 @@ class TelegramBot:
             bookmarks = BookmarkInstance.get_bookmarks()
 
         if not bookmarks:
-            self._edit_message(chat_id, msg_id, "Bookmark kosong. Tambahkan lewat WebUI atau CLI.")
-            self._clear_state(chat_id)
+            self._return_main_menu(
+                chat_id, msg_id, clear_state=True,
+                notice="Bookmark kosong. Tambahkan lewat WebUI atau CLI.",
+            )
             return
 
         state = self._get_state(chat_id)
@@ -1359,13 +1650,13 @@ class TelegramBot:
         state = self._get_state(chat_id)
         raw = (state.get("bm_map") or {}).get(str(idx))
         if not raw:
-            self._edit_message(chat_id, msg_id, "Bookmark tidak valid.")
+            self._finish_action(chat_id, msg_id, "Bookmark tidak valid.")
             return
 
         try:
             bm = json.loads(raw)
         except json.JSONDecodeError:
-            self._edit_message(chat_id, msg_id, "Data bookmark rusak.")
+            self._finish_action(chat_id, msg_id, "Data bookmark rusak.")
             return
 
         acc = self._require_active_account(chat_id, msg_id)
@@ -1385,17 +1676,17 @@ class TelegramBot:
             from app.service.bookmark import resolve_bookmark_option_code
             family = get_family(api_key, acc["tokens"], bm["family_code"], bm.get("is_enterprise", False))
         except Exception as e:
-            self._edit_message(chat_id, msg_id, _tg_err(e))
+            self._finish_action(chat_id, msg_id, _tg_err(e))
             return
 
         if not family:
-            self._edit_message(chat_id, msg_id, "Family bookmark tidak ditemukan.")
+            self._finish_action(chat_id, msg_id, "Family bookmark tidak ditemukan.")
             return
 
         option_code = resolve_bookmark_option_code(family, bm)
         if not option_code:
             hint = bm.get("option_name") or bm.get("variant_name") or "?"
-            self._edit_message(
+            self._finish_action(
                 chat_id, msg_id,
                 f"Paket bookmark tidak ditemukan di API.\n"
                 f"Coba hapus & tambah lagi dari WebUI (🔖 di detail paket): <i>{_esc(hint)}</i>",
@@ -1405,13 +1696,20 @@ class TelegramBot:
         self._handle_package_selected(chat_id, msg_id, option_code)
 
     def _handle_confirm_action(self, chat_id: int, msg_id: int, data: str):
-        pending = self._pending_confirm.pop(chat_id, None)
+        with self._state_lock:
+            pending = self._pending_confirm.pop(chat_id, None)
         if not pending:
-            self._edit_message(chat_id, msg_id, "Tidak ada aksi yang pending.")
+            self._return_main_menu(
+                chat_id, msg_id,
+                notice="Tidak ada aksi yang pending.",
+            )
             return
 
         if pending.get("expires", 0) < time.time():
-            self._edit_message(chat_id, msg_id, "Konfirmasi sudah expired. Silakan ulangi command.")
+            self._return_main_menu(
+                chat_id, msg_id,
+                notice="Konfirmasi sudah expired. Silakan ulangi command.",
+            )
             return
 
         action = pending.get("action")
@@ -1448,7 +1746,7 @@ class TelegramBot:
             "/kuota — Info pelanggan + kuota/paket aktif\n"
             "/saldo · /paket — sama dengan /kuota\n"
             "/beli &lt;option_code&gt; — Beli paket\n"
-            "/unsub &lt;quota_code&gt; — Unsubscribe\n"
+            "/unsub — Unsubscribe paket aktif\n"
             "/history — Riwayat (nomor aktif)\n\n"
             "Semua fitur memakai nomor aktif sampai diganti via 📱 Nomor."
         ))
@@ -1543,13 +1841,14 @@ class TelegramBot:
         price_str = f"Rp {price:,.0f}".replace(",", ".")
 
         # Store pending confirmation
-        self._pending_confirm[chat_id] = {
-            "action": "beli",
-            "option_code": option_code,
-            "pkg": pkg,
-            "account": acc,
-            "expires": time.time() + 120,
-        }
+        with self._state_lock:
+            self._pending_confirm[chat_id] = {
+                "action": "beli",
+                "option_code": option_code,
+                "pkg": pkg,
+                "account": acc,
+                "expires": time.time() + 120,
+            }
 
         kb = _kb_back_menu([
             [
@@ -1567,11 +1866,10 @@ class TelegramBot:
         ), reply_markup=kb)
 
     def _cmd_unsub(self, chat_id: int, args: list):
-        user = self._require_linked(chat_id)
-        if not user:
+        if not self._require_linked(chat_id):
             return
         if not args:
-            self.send(chat_id, "Usage: <code>/unsub KODE_PAKET</code>\n(Kode dari aplikasi XL / WebUI)")
+            self._show_unsub_package_menu(chat_id, None)
             return
 
         quota_code = args[0]
@@ -1580,50 +1878,41 @@ class TelegramBot:
             return
         api_key = get_api_key()
 
-        # Find the quota to get its name and metadata
+        quota_name = quota_code
+        product_domain = ""
+        product_sub_type = ""
         try:
-            from app.client.engsel import send_api_request
-            res = send_api_request(
-                api_key, "api/v8/packages/quota-details",
-                {"is_enterprise": False, "lang": "en", "family_member_id": ""},
-                acc["tokens"]["id_token"], "POST",
-            )
-            quota_name = quota_code
-            product_domain = ""
-            product_sub_type = ""
-            if isinstance(res, dict) and res.get("status") == "SUCCESS":
-                for q in (res.get("data") or {}).get("quotas") or []:
-                    if q.get("quota_code") == quota_code:
-                        quota_name = q.get("name", quota_code)
-                        product_domain = q.get("product_domain", "")
-                        product_sub_type = q.get("product_subscription_type", "")
-                        break
+            for q in self._fetch_active_quotas(api_key, acc):
+                if q.get("quota_code") == quota_code:
+                    quota_name = q.get("name", quota_code)
+                    product_domain = q.get("product_domain", "")
+                    product_sub_type = q.get("product_subscription_type", "")
+                    break
         except Exception:
-            quota_name = quota_code
-            product_domain = ""
-            product_sub_type = ""
+            pass
 
-        self._pending_confirm[chat_id] = {
-            "action": "unsub",
-            "quota_code": quota_code,
-            "quota_name": quota_name,
-            "product_domain": product_domain,
-            "product_subscription_type": product_sub_type,
-            "account": acc,
-            "expires": time.time() + 120,
-        }
+        with self._state_lock:
+            self._pending_confirm[chat_id] = {
+                "action": "unsub",
+                "quota_code": quota_code,
+                "quota_name": quota_name,
+                "product_domain": product_domain,
+                "product_subscription_type": product_sub_type,
+                "account": acc,
+                "expires": time.time() + 120,
+            }
 
         kb = _kb_back_menu([
             [
                 {"text": "✅ Ya, Unsubscribe", "callback_data": "confirm:unsub"},
-                {"text": "❌ Batal", "callback_data": "cancel"},
+                {"text": "❌ Batal", "callback_data": "unsub:list"},
             ],
         ])
         self.send(chat_id, (
             f"<b>Konfirmasi Unsubscribe</b>\n\n"
             f"📦 {_esc(quota_name)}\n"
-            f"📱 {acc['number']}\n\n"
-            f"Klik tombol di bawah atau ketik <b>ya</b> / <b>batal</b>."
+            f"📱 <code>{acc['number']}</code>\n\n"
+            "Yakin ingin stop paket ini?"
         ), reply_markup=kb)
 
     def _cmd_history(self, chat_id: int, args: list):
@@ -1652,22 +1941,26 @@ class TelegramBot:
                     lines.append(f"    {date} · {method}")
         except Exception as e:
             lines.append(_tg_err(e))
-        self.send(chat_id, "\n".join(lines), reply_markup=_kb_back_only())
+        self._finish_action(chat_id, None, "\n".join(lines))
 
     # ── Confirmation handler ──
 
     def _handle_confirm(self, chat_id: int, text: str):
-        pending = self._pending_confirm.pop(chat_id, None)
+        with self._state_lock:
+            pending = self._pending_confirm.pop(chat_id, None)
         if not pending:
             return
 
         if pending.get("expires", 0) < time.time():
-            self.send(chat_id, "Konfirmasi sudah expired. Silakan ulangi command.")
+            self._return_main_menu(
+                chat_id,
+                notice="Konfirmasi sudah expired. Silakan ulangi command.",
+            )
             return
 
         answer = text.lower().strip()
         if answer not in ("ya", "y", "yes", "ok"):
-            self.send(chat_id, "Dibatalkan.")
+            self._return_main_menu(chat_id, notice="Dibatalkan.")
             return
 
         action = pending.get("action")
@@ -1710,10 +2003,7 @@ class TelegramBot:
         except Exception as e:
             msg = _tg_err(e)
 
-        if edit_msg_id:
-            self._edit_message(chat_id, edit_msg_id, msg, reply_markup=_kb_back_only())
-        else:
-            self.send(chat_id, msg, reply_markup=_kb_back_only())
+        self._finish_action(chat_id, edit_msg_id, msg)
 
     def _execute_unsub(self, chat_id: int, pending: dict, api_key: str, edit_msg_id: int | None = None):
         acc = pending["account"]
@@ -1734,7 +2024,4 @@ class TelegramBot:
         except Exception as e:
             msg = _tg_err(e)
 
-        if edit_msg_id:
-            self._edit_message(chat_id, edit_msg_id, msg, reply_markup=_kb_back_only())
-        else:
-            self.send(chat_id, msg, reply_markup=_kb_back_only())
+        self._finish_action(chat_id, edit_msg_id, msg)

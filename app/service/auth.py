@@ -87,9 +87,10 @@ class Auth:
             existing["refresh_token"] = refresh_token
         else:
             tokens = get_new_token(self.api_key, refresh_token, "")
-            profile_data = get_profile(self.api_key, tokens["access_token"], tokens["id_token"])
-            sub_id = profile_data["profile"]["subscriber_id"]
-            sub_type = profile_data["profile"]["subscription_type"]
+            profile_data = get_profile(self.api_key, tokens["access_token"], tokens["id_token"]) or {}
+            profile = profile_data.get("profile") or {}
+            sub_id = profile.get("subscriber_id") or ""
+            sub_type = profile.get("subscription_type") or "PREPAID"
 
             self.refresh_tokens.append({
                 "number": int(number),
@@ -113,15 +114,23 @@ class Auth:
         
         # If the removed user was the active user, select a new active user if available
         if self.active_user and self.active_user["number"] == number:
+            self.active_user = None
             # Select the first user as active user by default
             if len(self.refresh_tokens) != 0:
                 first_rt = self.refresh_tokens[0]
-                tokens = get_new_token(self.api_key, first_rt["refresh_token"], first_rt.get("subscriber_id", ""))
-                if tokens:
-                    self.set_active_user(first_rt["number"])
+                try:
+                    tokens = get_new_token(self.api_key, first_rt["refresh_token"], first_rt.get("subscriber_id", ""))
+                    if tokens:
+                        self.set_active_user(first_rt["number"])
+                except Exception as e:
+                    print(f"Failed to activate next after remove {number}: {e}")
             else:
                 print("No users left.")
-                self.active_user = None
+                if os.path.exists("active.number"):
+                    try:
+                        os.remove("active.number")
+                    except Exception:
+                        pass
 
     def set_active_user(self, number: int):
         # Get refresh token for the number from refresh_tokens
@@ -130,63 +139,106 @@ class Auth:
             print(f"No refresh token found for number: {number}")
             return False
 
-        tokens = get_new_token(self.api_key, rt_entry["refresh_token"], rt_entry.get("subscriber_id", ""))
-        if not tokens:
-            print(f"Failed to get tokens for number: {number}. The refresh token might be invalid or expired.")
+        try:
+            tokens = get_new_token(self.api_key, rt_entry["refresh_token"], rt_entry.get("subscriber_id", ""))
+            if not tokens:
+                print(f"Failed to get tokens for number: {number}. The refresh token might be invalid or expired.")
+                self.remove_refresh_token(number)
+                return False
+
+            profile_data = get_profile(self.api_key, tokens["access_token"], tokens["id_token"]) or {}
+            profile = profile_data.get("profile") or {}
+            subscriber_id = profile.get("subscriber_id") or rt_entry.get("subscriber_id", "")
+            subscription_type = profile.get("subscription_type") or rt_entry.get("subscription_type", "PREPAID")
+
+            self.active_user = {
+                "number": int(number),
+                "subscriber_id": subscriber_id,
+                "subscription_type": subscription_type,
+                "tokens": tokens
+            }
+            
+            # Update refresh token entry with subscriber_id and subscription_type
+            rt_entry["subscriber_id"] = subscriber_id
+            rt_entry["subscription_type"] = subscription_type
+            
+            # Update refresh token. The real client app do this, not sure why cz refresh token should still be valid
+            rt_entry["refresh_token"] = tokens["refresh_token"]
+            self.write_tokens_to_file()
+            
+            self.last_refresh_time = int(time.time())
+            
+            # Save active number to file
+            self.write_active_number()
+            return True
+        except Exception as e:
+            err = str(e)
+            print(f"Error activating number {number}: {err}")
+            # Auto-clean invalid/expired tokens so user isn't stuck
+            if any(kw in err.lower() for kw in ["invalid or expired", "session not active", "subscriber id is missing", "refresh token"]):
+                print(f"Auto-removing invalid token for {number}")
+                self.remove_refresh_token(number)
+            if self.active_user and self.active_user.get("number") == number:
+                self.active_user = None
             return False
-
-        profile_data = get_profile(self.api_key, tokens["access_token"], tokens["id_token"])
-        subscriber_id = profile_data["profile"]["subscriber_id"]
-        subscription_type = profile_data["profile"]["subscription_type"]
-
-        self.active_user = {
-            "number": int(number),
-            "subscriber_id": subscriber_id,
-            "subscription_type": subscription_type,
-            "tokens": tokens
-        }
-        
-        # Update refresh token entry with subscriber_id and subscription_type
-        rt_entry["subscriber_id"] = subscriber_id
-        rt_entry["subscription_type"] = subscription_type
-        
-        # Update refresh token. The real client app do this, not sure why cz refresh token should still be valid
-        rt_entry["refresh_token"] = tokens["refresh_token"]
-        self.write_tokens_to_file()
-        
-        self.last_refresh_time = int(time.time())
-        
-        # Save active number to file
-        self.write_active_number()
 
     def renew_active_user_token(self):
         if self.active_user:
-            tokens = get_new_token(self.api_key, self.active_user["tokens"]["refresh_token"], self.active_user["subscriber_id"])
-            if tokens:
-                self.active_user["tokens"] = tokens
-                self.last_refresh_time = int(time.time())
-                self.add_refresh_token(self.active_user["number"], self.active_user["tokens"]["refresh_token"])
-                
-                print("Active user token renewed successfully.")
-                return True
-            else:
-                print("Failed to renew active user token.")
+            try:
+                tokens = get_new_token(self.api_key, self.active_user["tokens"]["refresh_token"], self.active_user.get("subscriber_id", ""))
+                if tokens:
+                    self.active_user["tokens"] = tokens
+                    self.last_refresh_time = int(time.time())
+                    self.add_refresh_token(self.active_user["number"], self.active_user["tokens"]["refresh_token"])
+                    
+                    print("Active user token renewed successfully.")
+                    return True
+                else:
+                    print("Failed to renew active user token.")
+                    num = self.active_user.get("number")
+                    if num:
+                        self.remove_refresh_token(num)
+                    self.active_user = None
+            except Exception as e:
+                print(f"Renew error: {e}")
+                num = self.active_user.get("number") if self.active_user else None
+                if num and any(kw in str(e).lower() for kw in ["invalid", "expired", "session not active"]):
+                    self.remove_refresh_token(num)
+                self.active_user = None
         else:
             print("No active user set or missing refresh token.")
         return False
     
     def get_active_user(self):
         if not self.active_user:
-            # Choose the first user if available
-            if len(self.refresh_tokens) != 0:
-                first_rt = self.refresh_tokens[0]
-                tokens = get_new_token(self.api_key, first_rt["refresh_token"], first_rt.get("subscriber_id", ""))
-                if tokens:
-                    self.set_active_user(first_rt["number"])
-            return None
+            # Try to activate the first valid one, cleaning bad tokens along the way
+            for rt in list(self.refresh_tokens):  # copy because remove may mutate
+                try:
+                    tokens = get_new_token(self.api_key, rt["refresh_token"], rt.get("subscriber_id", ""))
+                    if tokens:
+                        if self.set_active_user(rt["number"]):
+                            break
+                except Exception as e:
+                    print(f"Bootstrap get_new failed for {rt.get('number')}: {e}")
+                    self.remove_refresh_token(rt["number"])
+            if not self.active_user:
+                return None
         
         if self.last_refresh_time is None or (int(time.time()) - self.last_refresh_time) > 300:
-            self.renew_active_user_token()
+            try:
+                self.renew_active_user_token()
+            except Exception as e:
+                print(f"Renew failed: {e}")
+                # if current active is bad, clean it
+                if self.active_user:
+                    num = self.active_user.get("number")
+                    try:
+                        # force a get_new to see
+                        get_new_token(self.api_key, self.active_user["tokens"]["refresh_token"], self.active_user.get("subscriber_id", ""))
+                    except Exception:
+                        if num:
+                            self.remove_refresh_token(num)
+                        self.active_user = None
             self.last_refresh_time = time.time()
         
         return self.active_user
@@ -213,6 +265,14 @@ class Auth:
                 number_str = f.read().strip()
                 if number_str.isdigit():
                     number = int(number_str)
-                    self.set_active_user(number)
+                    success = self.set_active_user(number)
+                    if not success:
+                        # Bad active saved → clear it so we don't keep trying the dead one
+                        try:
+                            if os.path.exists("active.number"):
+                                os.remove("active.number")
+                        except Exception:
+                            pass
+                        self.active_user = None
 
 AuthInstance = Auth()

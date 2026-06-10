@@ -93,7 +93,10 @@ def famplan_change(
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = change_member(AuthInstance.api_key, user["tokens"], parent_alias, alias, slot_id, family_member_id, new_msisdn)
+    try:
+        res = change_member(AuthInstance.api_key, user["tokens"], parent_alias, alias, slot_id, family_member_id, new_msisdn)
+    except Exception as e:
+        return render(request, "error.html", title="Ganti member gagal", message=str(e))
     return render(request, "famplan_result.html", title="Ganti Member", res=res)
 
 
@@ -102,7 +105,10 @@ def famplan_remove(request: Request, family_member_id: str = Form(...)):
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = remove_member(AuthInstance.api_key, user["tokens"], family_member_id)
+    try:
+        res = remove_member(AuthInstance.api_key, user["tokens"], family_member_id)
+    except Exception as e:
+        return render(request, "error.html", title="Hapus member gagal", message=str(e))
     return render(request, "famplan_result.html", title="Hapus Member", res=res)
 
 
@@ -117,7 +123,10 @@ def famplan_quota(
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
     new_alloc = new_allocation_mb * 1024 * 1024
-    res = set_quota_limit(AuthInstance.api_key, user["tokens"], original_allocation, new_alloc, family_member_id)
+    try:
+        res = set_quota_limit(AuthInstance.api_key, user["tokens"], original_allocation, new_alloc, family_member_id)
+    except Exception as e:
+        return render(request, "error.html", title="Set quota gagal", message=str(e))
     return render(request, "famplan_result.html", title="Set Quota", res=res)
 
 

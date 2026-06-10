@@ -54,7 +54,10 @@ def circle_invite(
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = invite_circle_member(AuthInstance.api_key, user["tokens"], msisdn, name, group_id, member_id_parent)
+    try:
+        res = invite_circle_member(AuthInstance.api_key, user["tokens"], msisdn, name, group_id, member_id_parent)
+    except Exception as e:
+        return render(request, "error.html", title="Invite gagal", message=str(e))
     return render(request, "circle_result.html", title="Invite Member", res=res)
 
 
@@ -67,11 +70,14 @@ def circle_remove(
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = remove_circle_member(
-        AuthInstance.api_key, user["tokens"],
-        member_id, group_id, member_id_parent,
-        is_last_member=str(is_last_member).lower() in ("true", "1", "yes", "on"),
-    )
+    try:
+        res = remove_circle_member(
+            AuthInstance.api_key, user["tokens"],
+            member_id, group_id, member_id_parent,
+            is_last_member=str(is_last_member).lower() in ("true", "1", "yes", "on"),
+        )
+    except Exception as e:
+        return render(request, "error.html", title="Remove gagal", message=str(e))
     return render(request, "circle_result.html", title="Remove Member", res=res)
 
 
@@ -80,7 +86,10 @@ def circle_accept(request: Request, group_id: str = Form(...), member_id: str = 
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = accept_circle_invitation(AuthInstance.api_key, user["tokens"], group_id, member_id)
+    try:
+        res = accept_circle_invitation(AuthInstance.api_key, user["tokens"], group_id, member_id)
+    except Exception as e:
+        return render(request, "error.html", title="Accept gagal", message=str(e))
     return render(request, "circle_result.html", title="Accept Invitation", res=res)
 
 
@@ -93,5 +102,8 @@ def circle_create(
     user = get_active_user_safe()
     if not user:
         return render(request, "error.html", title="Login dulu", message="Belum ada akun aktif.")
-    res = create_circle(AuthInstance.api_key, user["tokens"], parent_name, group_name, member_msisdn, member_name)
+    try:
+        res = create_circle(AuthInstance.api_key, user["tokens"], parent_name, group_name, member_msisdn, member_name)
+    except Exception as e:
+        return render(request, "error.html", title="Create circle gagal", message=str(e))
     return render(request, "circle_result.html", title="Create Circle", res=res)

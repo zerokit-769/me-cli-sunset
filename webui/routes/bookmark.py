@@ -9,7 +9,10 @@ router = APIRouter()
 
 @router.get("/bookmark")
 def bookmark_page(request: Request):
-    BookmarkInstance.load_bookmark()
+    try:
+        BookmarkInstance.load_bookmark()
+    except Exception as e:
+        return render(request, "error.html", title="Gagal load bookmark", message=str(e))
     return render(request, "bookmark.html", bookmarks=BookmarkInstance.get_bookmarks())
 
 
@@ -25,10 +28,13 @@ def bookmark_add(
     package_option_code: str = Form(""),
 ):
     is_ent = str(is_enterprise).lower() in ("true", "1", "yes", "on")
-    BookmarkInstance.add_bookmark(
-        family_code, family_name, is_ent, variant_name, option_name, order,
-        package_option_code=package_option_code,
-    )
+    try:
+        BookmarkInstance.add_bookmark(
+            family_code, family_name, is_ent, variant_name, option_name, order,
+            package_option_code=package_option_code,
+        )
+    except Exception as e:
+        return render(request, "error.html", title="Tambah bookmark gagal", message=str(e))
     return RedirectResponse(url="/bookmark", status_code=303)
 
 
@@ -41,5 +47,8 @@ def bookmark_remove(
     order: int = Form(0),
 ):
     is_ent = str(is_enterprise).lower() in ("true", "1", "yes", "on")
-    BookmarkInstance.remove_bookmark(family_code, is_ent, variant_name, order)
+    try:
+        BookmarkInstance.remove_bookmark(family_code, is_ent, variant_name, order)
+    except Exception as e:
+        return render(request, "error.html", title="Hapus bookmark gagal", message=str(e))
     return RedirectResponse(url="/bookmark", status_code=303)

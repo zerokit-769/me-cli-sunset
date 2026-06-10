@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 import traceback
 from datetime import datetime
 from html import escape
@@ -36,14 +37,25 @@ def safe_html(text) -> str:
 
 
 def public_error_message(exc: Exception, *, context: str = "") -> str:
-    """Log full exception server-side; return a safe message for the browser."""
+    """Log full exception server-side; return a safe message for the browser.
+    Also appends to webui-errors.log (project root) for post-mortem even if console not visible.
+    """
+    tb = traceback.format_exc()
     if context:
-        logger.error("Request error [%s]: %s\n%s", context, exc, traceback.format_exc())
+        logger.error("Request error [%s]: %s\n%s", context, exc, tb)
     else:
-        logger.error("Unhandled error: %s\n%s", exc, traceback.format_exc())
+        logger.error("Unhandled error: %s\n%s", exc, tb)
+    # Persistent log
+    try:
+        from pathlib import Path
+        log_path = Path(__file__).resolve().parents[1] / "webui-errors.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {context or 'no-ctx'}: {exc}\n{tb}\n---\n")
+    except Exception:
+        pass
     debug = os.getenv("WEBUI_DEBUG", "").strip().lower() in ("1", "true", "yes")
     if debug:
-        return f"Internal error: {exc}"
+        return f"Internal error: {exc}\n\n{tb}"
     return "Terjadi kesalahan internal. Silakan coba lagi atau hubungi admin jika masalah berlanjut."
 
 def humanize_bytes(n) -> str:

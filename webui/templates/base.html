@@ -15,24 +15,35 @@
     } } }
   </script>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen antialiased">
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased overflow-x-hidden">
 
 <!-- GLOBAL LOADER -->
-<div id="page-loader" class="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center pointer-events-none" style="opacity:0; transition: opacity 150ms ease;">
-  <div class="flex flex-col items-center gap-4 px-6 text-center">
-    <div class="relative w-16 h-16">
-      <div class="absolute inset-0 rounded-full border-4 border-slate-700"></div>
-      <div class="absolute inset-0 rounded-full border-4 border-transparent border-t-indigo-400 animate-spin"></div>
+<div id="page-loader" class="page-loader fixed inset-0 z-50 flex items-center justify-center pointer-events-none" style="opacity:0; transition: opacity 150ms ease;">
+  <div class="page-loader__backdrop absolute inset-0 bg-slate-950/88 backdrop-blur-md"></div>
+  <div class="page-loader__panel relative flex flex-col items-center gap-5 px-8 py-7 text-center max-w-sm mx-4">
+    <div class="page-loader__spinner relative w-20 h-20">
+      <div class="page-loader__ring page-loader__ring--outer absolute inset-0 rounded-full"></div>
+      <div class="page-loader__ring page-loader__ring--spin absolute inset-1 rounded-full"></div>
+      <div class="page-loader__ring page-loader__ring--pulse absolute inset-3 rounded-full"></div>
+      <div class="page-loader__icon absolute inset-0 flex items-center justify-center text-2xl" id="page-loader-icon">⏳</div>
     </div>
-    <div id="page-loader-msg" class="text-sm text-slate-300">Memuat…</div>
-    <div class="text-xs text-slate-500">Tunggu sebentar ya cuy</div>
+    <div class="w-full space-y-2">
+      <div id="page-loader-msg" class="text-sm font-medium text-slate-200">Memuat…</div>
+      <div id="page-loader-sub" class="text-xs text-slate-500">Tunggu sebentar ya cuy</div>
+      <div id="page-loader-bar" class="page-loader__bar hidden" aria-hidden="true">
+        <div class="page-loader__bar-fill"></div>
+      </div>
+      <div id="page-loader-dots" class="page-loader__dots hidden" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
   </div>
 </div>
 
 <!-- CONFIRM MODAL -->
-<div id="confirm-modal" class="fixed inset-0 z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4 pointer-events-none" style="opacity:0; transition: opacity 150ms ease;">
+<div id="confirm-modal" class="confirm-modal fixed inset-0 z-[60] flex items-center justify-center pointer-events-none" style="opacity:0; transition: opacity 150ms ease;">
   <div id="confirm-backdrop" class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm"></div>
-  <div id="confirm-panel" class="relative bg-slate-900 border border-slate-700 rounded-t-2xl sm:rounded-2xl shadow-2xl w-full sm:max-w-md transform translate-y-4 sm:translate-y-0 transition-transform duration-150">
+  <div id="confirm-panel" class="confirm-modal__panel relative bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl w-[calc(100%-2rem)] max-w-md transition-transform duration-150 ease-out">
     <div class="p-5 sm:p-6">
       <div class="flex items-start gap-3">
         <div id="confirm-icon" class="w-11 h-11 rounded-full flex items-center justify-center text-xl shrink-0 bg-amber-500/15 text-amber-300 border border-amber-500/30">⚠️</div>
@@ -152,8 +163,8 @@
 <div id="nav-backdrop" class="lg:hidden fixed inset-0 bg-black/50 z-30 hidden"></div>
 
 <!-- MAIN -->
-<main class="lg:pl-64 pb-20 lg:pb-8">
-  <div class="px-4 py-6 max-w-5xl mx-auto">
+<main class="lg:pl-64 pb-20 lg:pb-8 min-w-0 max-w-full overflow-x-clip">
+  <div class="px-4 py-6 max-w-5xl mx-auto min-w-0 w-full">
     {% block content %}{% endblock %}
   </div>
 </main>
@@ -179,6 +190,11 @@
   bt && bt.addEventListener('click', open);
   bd && bd.addEventListener('click', close);
 })();
+
+// form.method is shadowed when <input name="method"> exists (e.g. payment method).
+function formHttpMethod(form) {
+  return (form.getAttribute('method') || 'get').toUpperCase();
+}
 
 // ===== Confirm Modal =====
 // Use by adding `data-confirm="Yakin mau lanjut?"` on a <form> or <a>.
@@ -222,14 +238,16 @@
     pending = { onOk, onCancel };
     modal.style.opacity = '1';
     modal.classList.remove('pointer-events-none');
-    panel.style.transform = 'translateY(0)';
+    panel.style.transform = 'scale(1)';
+    panel.style.opacity = '1';
     // focus for keyboard
     setTimeout(() => okBtn.focus(), 50);
   }
   function hide(cancelled) {
     modal.style.opacity = '0';
     modal.classList.add('pointer-events-none');
-    panel.style.transform = '';
+    panel.style.transform = 'scale(0.96)';
+    panel.style.opacity = '0';
     const p = pending; pending = null;
     if (p && cancelled && p.onCancel) p.onCancel();
   }
@@ -273,6 +291,68 @@
     };
   }
 
+  function loaderMessageForForm(f) {
+    const action = (f.getAttribute('action') || location.pathname).toLowerCase();
+    const method = formHttpMethod(f);
+    if (action.includes('/purchase/')) return 'Memproses pembelian…';
+    if (action.includes('/login/request-otp')) return 'Mengirim OTP…';
+    if (action.includes('/login/submit-otp')) return 'Verifikasi OTP…';
+    if (action.includes('/unsubscribe')) return 'Unsubscribe paket…';
+    if (action.includes('/bookmark')) return 'Update bookmark…';
+    if (action.includes('/register')) return 'Memproses register…';
+    return method === 'GET' ? 'Memuat…' : 'Memproses…';
+  }
+
+  function resetConfirmState(f) {
+    delete f.dataset.__confirmed;
+    delete f.dataset.__submitting;
+    delete f.dataset.__loaderShown;
+  }
+
+  function showConfirmForForm(f) {
+    resetConfirmState(f);
+    show(readAttrs(f, f), () => submitConfirmedForm(f), null);
+  }
+
+  // After confirm OK: POST via fetch so loader stays up until response (no submit-listener race).
+  function submitConfirmedForm(f) {
+    f.dataset.__confirmed = '1';
+    const action = f.getAttribute('action') || location.pathname;
+    const method = formHttpMethod(f);
+    const isPayment = action.toLowerCase().includes('/purchase/');
+    if (window.__loader) {
+      window.__loader.show(loaderMessageForForm(f), { payment: isPayment });
+    }
+    const go = () => {
+      const opts = { method, credentials: 'same-origin', redirect: 'follow' };
+      let url = action;
+      if (method === 'GET') {
+        const qs = new URLSearchParams(new FormData(f)).toString();
+        url = qs ? action + '?' + qs : action;
+      } else {
+        opts.body = new FormData(f);
+      }
+      fetch(url, opts)
+        .then((res) => {
+          if (res.redirected) {
+            window.location.href = res.url;
+            return;
+          }
+          return res.text().then((html) => {
+            document.open();
+            document.write(html);
+            document.close();
+          });
+        })
+        .catch(() => {
+          resetConfirmState(f);
+          if (window.__loader) window.__loader.hide();
+          alert('Gagal memproses. Coba lagi.');
+        });
+    };
+    requestAnimationFrame(() => requestAnimationFrame(go));
+  }
+
   // Intercept form submits with data-confirm
   document.addEventListener('submit', function(e){
     const f = e.target;
@@ -281,9 +361,19 @@
     if (f.dataset.__confirmed) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    show(readAttrs(f),
-      () => { f.dataset.__confirmed = '1'; f.requestSubmit ? f.requestSubmit() : f.submit(); },
-      null);
+    showConfirmForForm(f);
+  }, true);
+
+  // Button trigger: Bayar -> modal -> Bayar Sekarang -> submit
+  document.addEventListener('click', function(e){
+    const btn = e.target.closest('[data-confirm-trigger]');
+    if (!btn) return;
+    const f = btn.closest('form');
+    if (!f || !f.hasAttribute('data-confirm')) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (!f.checkValidity()) { f.reportValidity(); return; }
+    showConfirmForForm(f);
   }, true);
 
   // Intercept link clicks with data-confirm
@@ -309,24 +399,42 @@
 (function(){
   const loader = document.getElementById('page-loader');
   const msg = document.getElementById('page-loader-msg');
+  const sub = document.getElementById('page-loader-sub');
+  const icon = document.getElementById('page-loader-icon');
+  const bar = document.getElementById('page-loader-bar');
+  const dots = document.getElementById('page-loader-dots');
   if (!loader) return;
   let timer = null;
 
-  function show(text) {
-    if (text) msg.textContent = text;
-    // Instant show (no transition) for perceived responsiveness
+  function isPaymentAction(actionUrl) {
+    return (actionUrl || '').toLowerCase().includes('/purchase/');
+  }
+
+  function setMode(payment) {
+    loader.classList.toggle('is-payment', !!payment);
+    if (icon) icon.textContent = payment ? '💸' : '⏳';
+    if (sub) sub.textContent = payment ? 'Jangan tutup halaman — lagi hubung ke MyXL…' : 'Tunggu sebentar ya cuy';
+    if (bar) bar.classList.toggle('hidden', !payment);
+    if (dots) dots.classList.toggle('hidden', !payment);
+  }
+
+  function show(text, opts) {
+    opts = opts || {};
+    if (text && msg) msg.textContent = text;
+    const payment = opts.payment || isPaymentAction(text);
+    setMode(payment);
     loader.style.transition = 'none';
     loader.style.opacity = '1';
-    loader.classList.remove('pointer-events-none');
+    // Visual overlay only — must not block navigation or fetch submit.
+    loader.classList.add('pointer-events-none');
   }
   function hide() {
-    // Fade out smoothly
-    loader.style.transition = 'opacity 150ms ease';
+    loader.style.transition = 'opacity 180ms ease';
     loader.style.opacity = '0';
     loader.classList.add('pointer-events-none');
+    loader.classList.remove('is-payment');
     if (timer) { clearTimeout(timer); timer = null; }
   }
-  // Expose for inline use
   window.__loader = { show, hide };
 
   // Hide on page load / bfcache restore
@@ -363,12 +471,23 @@
     if (!(f instanceof HTMLFormElement)) return;
     if (f.dataset.noLoader) return;
     if (f.target === '_blank') return;
+    // Unconfirmed data-confirm forms are handled by the confirm modal.
+    if (f.hasAttribute('data-confirm') && !f.dataset.__confirmed) return;
+    // Confirmed: show loader and let the browser submit normally.
+    if (f.hasAttribute('data-confirm') && f.dataset.__confirmed) {
+      if (!f.dataset.__loaderShown) {
+        f.dataset.__loaderShown = '1';
+        const action = f.getAttribute('action') || location.pathname;
+        show(describe(action, formHttpMethod(f)), { payment: isPaymentAction(action) });
+      }
+      return;
+    }
     if (f.dataset.__submitting) return;
     e.preventDefault();
     f.dataset.__submitting = '1';
     const action = f.getAttribute('action') || location.pathname;
-    show(describe(action, (f.method || 'GET').toUpperCase()));
-    paintThen(() => { try { f.submit(); } catch (_) { f.dataset.__submitting = ''; hide(); } });
+    show(describe(action, formHttpMethod(f)), { payment: isPaymentAction(action) });
+    paintThen(() => { try { HTMLFormElement.prototype.submit.call(f); } catch (_) { f.dataset.__submitting = ''; hide(); } });
   }, true);
 
   // Link clicks → for slow internal routes, prevent default + show + paint + navigate.
