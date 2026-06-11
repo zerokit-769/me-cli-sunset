@@ -149,6 +149,7 @@ def create_app() -> FastAPI:
     from webui.routes import decoy_settings as r_decoy_settings
     from webui.routes import webui_auth as r_webui_auth
     from webui.routes import monitoring as r_monitoring
+    from webui.routes import theme as r_theme
 
     app.include_router(r_webui_auth.router)
     app.include_router(r_dashboard.router)
@@ -165,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(r_registration.router)
     app.include_router(r_decoy_settings.router)
     app.include_router(r_monitoring.router)
+    app.include_router(r_theme.router)
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):

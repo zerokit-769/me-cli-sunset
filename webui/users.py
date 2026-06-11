@@ -206,6 +206,27 @@ def link_telegram(username: str, chat_id: int) -> bool:
     return False
 
 
+def set_theme(username: str, theme: str) -> bool:
+    """Set the UI theme for a user. Valid values: 'dark', 'light'."""
+    if theme not in ("dark", "light"):
+        return False
+    users = load_users()
+    for u in users:
+        if u.get("username", "").lower() == username.lower():
+            u["theme"] = theme
+            save_users(users)
+            return True
+    return False
+
+
+def get_theme(username: str) -> str:
+    """Return the user's theme preference. Default: 'dark'."""
+    u = get_user(username)
+    if u:
+        return u.get("theme", "dark")
+    return "dark"
+
+
 def unlink_telegram(username: str) -> bool:
     users = load_users()
     for u in users:

@@ -260,6 +260,252 @@ pre {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* ========================================================================
+   LIGHT THEME OVERRIDES
+   Applied when <html class="theme-light"> is set.
+   Overrides Tailwind inline utilities + custom classes for a clean white UI.
+   ======================================================================== */
+
+/* --- Body & global text --- */
+.theme-light body {
+  background: #f8fafc !important; /* slate-50 */
+  color: #1e293b !important;       /* slate-800 */
+}
+
+/* --- Topbar --- */
+.theme-light header {
+  background: rgba(255,255,255,0.85) !important;
+  border-color: #e2e8f0 !important; /* slate-200 */
+  backdrop-filter: blur(12px);
+}
+.theme-light header a,
+.theme-light header span,
+.theme-light header button {
+  color: #475569 !important; /* slate-600 */
+}
+.theme-light header a:hover,
+.theme-light header button:hover {
+  color: #0f172a !important;
+}
+.theme-light header select {
+  background: #f1f5f9 !important;
+  border-color: #e2e8f0 !important;
+  color: #334155 !important;
+}
+.theme-light header .text-slate-200,
+.theme-light header b.text-slate-200 {
+  color: #1e293b !important;
+}
+
+/* --- Sidebar --- */
+.theme-light #sidebar {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+.theme-light #sidebar .text-slate-500 {
+  color: #94a3b8 !important;
+}
+.theme-light #sidebar .text-slate-600 {
+  color: #94a3b8 !important;
+}
+.theme-light #sidebar nav a {
+  color: #475569 !important;
+}
+.theme-light #sidebar nav a:hover {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+}
+/* Active sidebar link */
+.theme-light #sidebar nav a.bg-indigo-600\/30 {
+  background: rgba(99, 102, 241, 0.1) !important;
+  color: #4f46e5 !important;
+  border-color: rgba(99, 102, 241, 0.3) !important;
+}
+.theme-light #sidebar .border-slate-800 {
+  border-color: #e2e8f0 !important;
+}
+.theme-light #sidebar .text-slate-200 {
+  color: #1e293b !important;
+}
+.theme-light #sidebar .text-slate-400 {
+  color: #64748b !important;
+}
+.theme-light #sidebar .bg-slate-800\/60 {
+  background: #f1f5f9 !important;
+}
+.theme-light #sidebar .text-red-400 {
+  color: #dc2626 !important;
+}
+
+/* Sidebar logo gradient — keep as-is for brand consistency */
+
+/* --- Backdrop --- */
+.theme-light #nav-backdrop {
+  background: rgba(0,0,0,0.2) !important;
+}
+
+/* --- Main content area --- */
+.theme-light main {
+  background: #f8fafc !important;
+}
+
+/* --- Cards --- */
+.theme-light .card {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 1px 3px 0 rgba(0,0,0,0.05);
+}
+.theme-light .card:hover {
+  border-color: rgba(99, 102, 241, 0.4) !important;
+  box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.1);
+}
+.theme-light .card-action {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+  color: #334155 !important;
+}
+.theme-light .card-action:hover {
+  background: #f1f5f9 !important;
+  border-color: rgba(99, 102, 241, 0.4) !important;
+  box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.15);
+}
+
+/* --- Buttons --- */
+.theme-light .btn-secondary {
+  background: #e2e8f0 !important;
+  color: #334155 !important;
+}
+.theme-light .btn-secondary:hover {
+  background: #cbd5e1 !important;
+}
+
+/* --- Form inputs --- */
+.theme-light .form-input {
+  background: #f8fafc !important;
+  border-color: #d1d5db !important;
+  color: #1e293b !important;
+}
+.theme-light .form-input:focus {
+  border-color: rgb(99, 102, 241) !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15) !important;
+}
+.theme-light .label {
+  color: #64748b !important;
+}
+
+/* --- Alerts --- */
+.theme-light .alert-error {
+  background: rgba(254, 226, 226, 0.6) !important;
+  border-color: rgba(220, 38, 38, 0.3) !important;
+  color: #991b1b !important;
+}
+.theme-light .alert-success {
+  background: rgba(220, 252, 231, 0.6) !important;
+  border-color: rgba(34, 197, 94, 0.3) !important;
+  color: #166534 !important;
+}
+
+/* --- Bottom Nav (mobile) --- */
+.theme-light nav.fixed.bottom-0 {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: #e2e8f0 !important;
+}
+.theme-light nav.fixed.bottom-0 a {
+  color: #94a3b8 !important;
+}
+.theme-light nav.fixed.bottom-0 a.text-indigo-300 {
+  color: #4f46e5 !important;
+}
+
+/* --- Page Loader (light overlay) --- */
+.theme-light .page-loader__backdrop {
+  background: rgba(248,250,252,0.88) !important;
+}
+.theme-light .page-loader__panel {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: #e2e8f0 !important;
+  box-shadow: 0 24px 48px -12px rgba(0,0,0,0.1) !important;
+}
+.theme-light #page-loader-msg {
+  color: #334155 !important;
+}
+.theme-light #page-loader-sub {
+  color: #94a3b8 !important;
+}
+.theme-light .page-loader__ring--outer {
+  border-color: #e2e8f0 !important;
+}
+
+/* --- Confirm Modal --- */
+.theme-light #confirm-panel {
+  background: #ffffff !important;
+  border-color: #e2e8f0 !important;
+}
+.theme-light #confirm-title {
+  color: #1e293b !important;
+}
+.theme-light #confirm-message {
+  color: #475569 !important;
+}
+.theme-light #confirm-detail {
+  background: #f8fafc !important;
+  border-color: #e2e8f0 !important;
+  color: #64748b !important;
+}
+.theme-light #confirm-backdrop {
+  background: rgba(0,0,0,0.25) !important;
+}
+
+/* --- Scrollbar --- */
+.theme-light ::-webkit-scrollbar-track {
+  background: #f8fafc !important;
+}
+.theme-light ::-webkit-scrollbar-thumb {
+  background: #cbd5e1 !important;
+}
+.theme-light ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8 !important;
+}
+
+/* --- Tailwind utility class overrides for common dark patterns --- */
+/* Background overrides */
+.theme-light .bg-slate-950 { background: #f8fafc !important; }
+.theme-light .bg-slate-900 { background: #ffffff !important; }
+.theme-light .bg-slate-900\/70 { background: rgba(255,255,255,0.85) !important; }
+.theme-light .bg-slate-900\/95 { background: rgba(255,255,255,0.95) !important; }
+.theme-light .bg-slate-800 { background: #f1f5f9 !important; }
+.theme-light .bg-slate-800\/60 { background: rgba(241,245,249,0.8) !important; }
+.theme-light .bg-slate-950\/60 { background: rgba(248,250,252,0.6) !important; }
+.theme-light .bg-slate-950\/88 { background: rgba(248,250,252,0.88) !important; }
+
+/* Text overrides */
+.theme-light .text-slate-100 { color: #1e293b !important; }
+.theme-light .text-slate-200 { color: #334155 !important; }
+.theme-light .text-slate-300 { color: #475569 !important; }
+.theme-light .text-slate-400 { color: #64748b !important; }
+.theme-light .text-slate-500 { color: #94a3b8 !important; }
+.theme-light .text-slate-600 { color: #94a3b8 !important; }
+
+/* Border overrides */
+.theme-light .border-slate-700 { border-color: #e2e8f0 !important; }
+.theme-light .border-slate-800 { border-color: #e2e8f0 !important; }
+
+/* Hover state overrides */
+.theme-light .hover\:bg-slate-800:hover { background: #f1f5f9 !important; }
+.theme-light .hover\:text-white:hover { color: #0f172a !important; }
+.theme-light .hover\:text-slate-400:hover { color: #475569 !important; }
+
+/* Active indigo in light mode — slightly more vivid */
+.theme-light .text-indigo-200 { color: #4f46e5 !important; }
+.theme-light .text-indigo-300 { color: #4f46e5 !important; }
+.theme-light .bg-indigo-600\/30 { background: rgba(99,102,241,0.1) !important; }
+.theme-light .border-indigo-500\/40 { border-color: rgba(99,102,241,0.3) !important; }
+
+/* --- Details / Summary --- */
+.theme-light details > summary::before {
+  color: #94a3b8;
+}
+
 /* Misc */
 details > summary {
   list-style: none;
