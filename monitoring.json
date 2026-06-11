@@ -1,0 +1,29 @@
+[
+  {
+    "id": "24cb86cc6835",
+    "name": "kuota rendah",
+    "msisdn": 6281908004427,
+    "match": {
+      "kind": "any",
+      "value": "",
+      "data_type": "ANY"
+    },
+    "trigger": {
+      "metric": "remaining_pct",
+      "op": "lt",
+      "value": 10.0
+    },
+    "actions": [
+      {
+        "type": "telegram",
+        "message": "kuota rendah"
+      }
+    ],
+    "cooldown_seconds": 3600,
+    "enabled": true,
+    "created_at": 1781173261,
+    "last_fired_at": 1781177211,
+    "last_status": "ok",
+    "last_msg": "\u2705 tg: Pesan terkirim"
+  }
+]
