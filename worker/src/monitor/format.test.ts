@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderLayout } from "../ssr/engine";
-import { formatCacheCards } from "./format";
+import { extractQuotaNameOptions, formatCacheCards } from "./format";
 
 describe("monitor format", () => {
   it("renders quota names in monitoring cache cards", () => {
@@ -66,5 +66,26 @@ describe("monitor format", () => {
     });
     expect(html).toContain("Add PRIO");
     expect(html).toContain("Kuota Utama");
+  });
+
+  it("extracts unique quota names per msisdn for rule form", () => {
+    const options = extractQuotaNameOptions({
+      "6281": {
+        updated_at: 1,
+        balance: null,
+        quotas: [
+          { name: "Paket A", benefits: [] },
+          { name: "Paket A", benefits: [] },
+          { package_family: { name: "Paket B" }, benefits: [] },
+        ],
+      },
+      "6282": {
+        updated_at: 1,
+        balance: null,
+        quotas: [{ name: "Paket C", benefits: [] }],
+      },
+    });
+    expect(options).toHaveLength(3);
+    expect(options.map((o) => o.name).sort()).toEqual(["Paket A", "Paket B", "Paket C"]);
   });
 });

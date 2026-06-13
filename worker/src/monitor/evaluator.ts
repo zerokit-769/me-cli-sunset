@@ -1,3 +1,4 @@
+import { quotaDisplayName } from "./format";
 import type { RuleMatch, TriggerMetric, TriggerOp } from "./types";
 
 export function quotaMetricValue(
@@ -34,7 +35,7 @@ export function matchesFilter(
 
   if (kind === "any") return true;
   if (kind === "quota_name") {
-    return String(quota.name ?? "").toLowerCase().includes(val.toLowerCase());
+    return quotaDisplayName(quota).toLowerCase().includes(val.toLowerCase());
   }
   if (kind === "quota_code") return val === String(quota.quota_code ?? "");
   if (kind === "group_name") {

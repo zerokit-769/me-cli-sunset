@@ -36,10 +36,15 @@ def monitoring_dashboard(request: Request):
     log_lines = M.tail_log(50)
     accounts = _user_accounts(request)
 
+    quota_options = QC.extract_quota_name_options(cache)
+
     return render(
         request, "monitoring.html",
         cache=cache, rules=rules, tg=tg, tg_global=tg_global,
         log_lines=log_lines, myxl_accounts=accounts,
+        quota_options=quota_options,
+        has_quota_options=bool(quota_options),
+        default_telegram_message=QC.DEFAULT_RULE_TELEGRAM_MESSAGE,
     )
 
 
@@ -178,14 +183,15 @@ def add_rule(
         return RedirectResponse("/u/login", status_code=303)
 
     actions = []
+    msg = (action_message or "").strip() or QC.DEFAULT_RULE_TELEGRAM_MESSAGE or name
     if action_type == "telegram":
-        actions.append({"type": "telegram", "message": action_message or name})
+        actions.append({"type": "telegram", "message": msg})
     elif action_type == "buy_option":
         actions.append({"type": "buy_option", "option_code": action_option_code, "method": action_method})
     elif action_type == "unsubscribe":
         actions.append({"type": "unsubscribe"})
     elif action_type == "telegram_and_buy":
-        actions.append({"type": "telegram", "message": action_message or name})
+        actions.append({"type": "telegram", "message": msg})
         actions.append({"type": "buy_option", "option_code": action_option_code, "method": action_method})
 
     M.add_rule({

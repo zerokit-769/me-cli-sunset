@@ -3,7 +3,14 @@ import { getUser } from "../auth/users";
 import { getAccountForMsisdn, listAccounts } from "../myxl/accounts";
 import { createMyXlClients } from "../myxl/clients";
 import { checkUserOnce } from "../monitor/checker";
-import { formatCacheCards, formatRuleRows, hourOptions, minuteOptions } from "../monitor/format";
+import {
+  DEFAULT_RULE_TELEGRAM_MESSAGE,
+  extractQuotaNameOptions,
+  formatCacheCards,
+  formatRuleRows,
+  hourOptions,
+  minuteOptions,
+} from "../monitor/format";
 import { logLine, tailLog } from "../monitor/log";
 import { loadQuotaCache, updateAccountCache } from "../monitor/quota-cache";
 import { addRule, deleteRule, getRule, loadRules, updateRule } from "../monitor/rules";
@@ -41,6 +48,7 @@ monitoring.get("/monitoring", async (c) => {
   const tgUser = await resolveSendConfig(c.env, storage, webuiUser.username);
   const accounts = await listAccounts(storage, webuiUser.username);
   const logLines = await tailLog(storage, webuiUser.username, 50);
+  const quotaOptions = extractQuotaNameOptions(cache);
 
   return renderWebuiPage(c, webuiUser, "monitoring", {
     page_title: "Monitoring · WebUI-XL",
@@ -60,6 +68,9 @@ monitoring.get("/monitoring", async (c) => {
       subscription_type: a.subscription_type || "?",
     })),
     has_accounts: accounts.length > 0,
+    quota_options: quotaOptions,
+    has_quota_options: quotaOptions.length > 0,
+    default_telegram_message: DEFAULT_RULE_TELEGRAM_MESSAGE,
   });
 });
 
@@ -172,8 +183,10 @@ monitoring.post("/monitoring/rules", async (c) => {
   const body = await c.req.parseBody();
   const actionType = String(body.action_type ?? "telegram");
   const actions = [];
+  const actionMessage =
+    String(body.action_message ?? "").trim() || DEFAULT_RULE_TELEGRAM_MESSAGE || String(body.name ?? "");
   if (actionType === "telegram") {
-    actions.push({ type: "telegram" as const, message: String(body.action_message ?? body.name ?? "") });
+    actions.push({ type: "telegram" as const, message: actionMessage });
   } else if (actionType === "buy_option") {
     actions.push({
       type: "buy_option" as const,
@@ -183,7 +196,7 @@ monitoring.post("/monitoring/rules", async (c) => {
   } else if (actionType === "unsubscribe") {
     actions.push({ type: "unsubscribe" as const });
   } else if (actionType === "telegram_and_buy") {
-    actions.push({ type: "telegram" as const, message: String(body.action_message ?? body.name ?? "") });
+    actions.push({ type: "telegram" as const, message: actionMessage });
     actions.push({
       type: "buy_option" as const,
       option_code: String(body.action_option_code ?? ""),

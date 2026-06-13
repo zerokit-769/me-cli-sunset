@@ -25,6 +25,11 @@ describe("monitor evaluator", () => {
     expect(matchesFilter(quota, benefit, { kind: "quota_name", value: "voice" })).toBe(false);
   });
 
+  it("matches quota_name using package family fallback", () => {
+    const familyQuota = { package_family: { name: "Add PRIO" }, benefits: [] };
+    expect(matchesFilter(familyQuota, benefit, { kind: "quota_name", value: "add prio" })).toBe(true);
+  });
+
   it("filters by data_type", () => {
     expect(matchesFilter(quota, benefit, { kind: "any", data_type: "DATA" })).toBe(true);
     expect(matchesFilter(quota, benefit, { kind: "any", data_type: "VOICE" })).toBe(false);

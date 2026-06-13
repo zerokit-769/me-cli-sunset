@@ -16,7 +16,7 @@ export interface CacheQuotaRow {
   benefits: CacheBenefitRow[];
 }
 
-function resolveQuotaName(q: Record<string, unknown>): string {
+export function quotaDisplayName(q: Record<string, unknown>): string {
   const direct = String(q.name ?? "").trim();
   if (direct) return direct;
   const family = (q.package_family as Record<string, unknown> | undefined)?.name;
@@ -39,6 +39,18 @@ export interface CacheCardRow {
   quotas: CacheQuotaRow[];
 }
 
+export interface QuotaNameOption {
+  msisdn: string;
+  name: string;
+}
+
+export const DEFAULT_RULE_TELEGRAM_MESSAGE =
+  `{nodefault}⚠️ <b>Peringatan Kuota</b>\n\n` +
+  `📱 <code>{msisdn}</code>\n` +
+  `📦 <b>{quota}</b>\n` +
+  `📊 {benefit}: <b>{pct}%</b> tersisa ({remaining} / {total})\n\n` +
+  `<i>Segera top up biar kuota nggak habis ya!</i>`;
+
 export interface RuleRow {
   id: string;
   name: string;
@@ -52,14 +64,66 @@ export interface RuleRow {
   match_kind: string;
   match_value: string;
   has_match_value: boolean;
+  match_summary: string;
   trigger_metric: string;
   trigger_op: string;
   trigger_value: number;
+  trigger_summary: string;
   cooldown_seconds: number;
   last_fired_disp: string;
   has_last_fired: boolean;
   last_msg: string;
   has_last_msg: boolean;
+}
+
+const MATCH_KIND_LABELS: Record<string, string> = {
+  any: "Semua kuota",
+  quota_name: "Nama kuota",
+  quota_code: "Kode kuota",
+  group_name: "Grup kuota",
+};
+
+const TRIGGER_METRIC_LABELS: Record<string, string> = {
+  remaining_pct: "Sisa kuota (%)",
+  remaining_bytes: "Sisa data (byte)",
+  remaining_minutes: "Sisa menit",
+  expiring_in_days: "Hari sampai habis",
+};
+
+const TRIGGER_OP_LABELS: Record<string, string> = {
+  lt: "kurang dari",
+  lte: "kurang/sama dengan",
+  gt: "lebih dari",
+  gte: "lebih/sama dengan",
+  eq: "sama dengan",
+};
+
+function matchSummary(kind: string, value: string): string {
+  const label = MATCH_KIND_LABELS[kind] ?? kind;
+  if (kind === "any" || !value) return MATCH_KIND_LABELS.any;
+  return `${label}: ${value}`;
+}
+
+function triggerSummary(metric: string, op: string, value: number): string {
+  const m = TRIGGER_METRIC_LABELS[metric] ?? metric;
+  const o = TRIGGER_OP_LABELS[op] ?? op;
+  return `${m} ${o} ${value}`;
+}
+
+export function extractQuotaNameOptions(cache: QuotaCache): QuotaNameOption[] {
+  const seen = new Set<string>();
+  const out: QuotaNameOption[] = [];
+  for (const [msisdn, data] of Object.entries(cache)) {
+    for (const q of data.quotas ?? []) {
+      const name = quotaDisplayName(q);
+      if (!name || name === "-") continue;
+      const key = `${msisdn}:${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ msisdn, name });
+    }
+  }
+  return out.sort((a, b) => a.msisdn.localeCompare(b.msisdn) || a.name.localeCompare(b.name));
 }
 
 function barClass(pct: number): string {
@@ -93,7 +157,7 @@ export function formatCacheCards(cache: QuotaCache): CacheCardRow[] {
             display: `${display} (${pct.toFixed(0)}%)`,
           };
         });
-      const quotaName = resolveQuotaName(q);
+      const quotaName = quotaDisplayName(q);
       return {
         quota_name: quotaName,
         has_quota_name: quotaName !== "-",
@@ -129,9 +193,15 @@ export function formatRuleRows(rules: MonitoringRule[]): RuleRow[] {
       match_kind: r.match?.kind ?? "any",
       match_value: String(r.match?.value ?? ""),
       has_match_value: Boolean(r.match?.value),
+      match_summary: matchSummary(r.match?.kind ?? "any", String(r.match?.value ?? "")),
       trigger_metric: r.trigger?.metric ?? "remaining_pct",
       trigger_op: r.trigger?.op ?? "lt",
       trigger_value: r.trigger?.value ?? 0,
+      trigger_summary: triggerSummary(
+        r.trigger?.metric ?? "remaining_pct",
+        r.trigger?.op ?? "lt",
+        r.trigger?.value ?? 0,
+      ),
       cooldown_seconds: r.cooldown_seconds,
       last_fired_disp: r.last_fired_at ? formatTs(r.last_fired_at) : "",
       has_last_fired: Boolean(r.last_fired_at),

@@ -47,13 +47,14 @@ export async function executeRuleActions(
         msg = msg.replace("{msisdn}", String(user.number));
         if (!msg.includes("{nodefault}")) {
           const header =
-            `📡 <b>Quota Alert</b>\n` +
+            `⚠️ <b>Peringatan Kuota</b>\n` +
             `📱 <code>${user.number}</code> · ${user.subscription_type}\n` +
             `📦 ${quota.name ?? "-"}\n` +
-            `🎯 ${benefit.name ?? "-"}: ${pct.toFixed(1)}% ` +
+            `📊 ${benefit.name ?? "-"}: <b>${pct.toFixed(1)}%</b> ` +
             `(${isData ? formatBytes(rem) : rem} / ${isData ? formatBytes(tot) : tot})\n\n`;
           msg = header + msg;
         }
+        msg = msg.replace("{nodefault}", "");
         const { ok, info } = await sendTelegram(env, storage, msg, { cfg: tgCfg, username });
         results.push(`${ok ? "✅ tg: " : "⚠️ tg: "}${info}`);
       } else if (t === "buy_option") {

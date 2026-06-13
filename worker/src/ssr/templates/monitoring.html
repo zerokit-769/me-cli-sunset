@@ -100,15 +100,15 @@
 
 <section class="mb-6">
   <div class="flex items-center justify-between mb-3">
-    <h2 class="text-sm uppercase tracking-wider text-slate-400">Monitoring Rules</h2>
+    <h2 class="text-sm uppercase tracking-wider text-slate-400">Aturan Monitoring</h2>
   </div>
 
   {{#has_rules}}
   <div class="space-y-2 mb-4">
     {{#rules}}
     <div class="card {{#disabled}}opacity-50{{/disabled}}">
-      <div class="flex items-center justify-between">
-        <div>
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div class="min-w-0">
           <span class="font-medium text-sm text-white">{{name}}</span>
           <span class="text-xs text-slate-500 ml-2">{{msisdn}}</span>
           {{#last_status}}
@@ -117,22 +117,20 @@
           </span>
           {{/last_status}}
         </div>
-        <div class="flex gap-1">
+        <div class="flex gap-1 shrink-0">
           <form action="/monitoring/rules/{{id}}/toggle" method="post" data-no-loader>
-            <button type="submit" class="text-xs px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300">
-              {{#enabled}}ON{{/enabled}}{{^enabled}}OFF{{/enabled}}
+            <button type="submit" class="btn btn-secondary text-xs px-2.5 py-1">
+              {{#enabled}}Aktif{{/enabled}}{{^enabled}}Nonaktif{{/enabled}}
             </button>
           </form>
           <form action="/monitoring/rules/{{id}}/delete" method="post" data-confirm="Hapus rule '{{name}}'?" data-confirm-variant="danger">
-            <button type="submit" class="text-xs px-2 py-1 rounded bg-red-900/30 hover:bg-red-900/50 text-red-400">Del</button>
+            <button type="submit" class="btn btn-danger text-xs px-2.5 py-1">Hapus</button>
           </form>
         </div>
       </div>
-      <div class="text-xs text-slate-500 mt-1">
-        {{match_kind}}{{#has_match_value}}: {{match_value}}{{/has_match_value}}
-        · {{trigger_metric}} {{trigger_op}} {{trigger_value}}
-        · cooldown {{cooldown_seconds}}s
-        {{#has_last_fired}}· last fired {{last_fired_disp}}{{/has_last_fired}}
+      <div class="text-xs text-slate-500 mt-1 leading-relaxed">
+        {{match_summary}} · {{trigger_summary}} · jeda {{cooldown_seconds}} dtk
+        {{#has_last_fired}}· terakhir jalan {{last_fired_disp}}{{/has_last_fired}}
       </div>
       {{#has_last_msg}}
       <div class="text-xs text-slate-400 mt-1 truncate">{{last_msg}}</div>
@@ -142,20 +140,20 @@
   </div>
   {{/has_rules}}
   {{^has_rules}}
-  <div class="card text-center text-slate-500">Belum ada rule. Tambah rule di bawah.</div>
+  <div class="card text-center text-slate-500">Belum ada aturan. Tambah di bawah ya.</div>
   {{/has_rules}}
 
   <details class="card">
-    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-indigo-300 hover:text-indigo-200">+ Tambah Rule Baru</summary>
+    <summary class="cursor-pointer px-4 py-3 text-sm font-medium text-indigo-300 hover:text-indigo-200">+ Tambah Aturan Baru</summary>
     <form action="/monitoring/rules" method="post" class="p-4 space-y-4">
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label class="text-xs text-slate-400">Nama Rule</label>
-          <input name="name" class="form-input" placeholder="Kuota rendah alert">
+          <label class="label">Nama Aturan</label>
+          <input name="name" class="form-input" placeholder="Alert kuota rendah">
         </div>
         <div>
-          <label class="text-xs text-slate-400">MSISDN</label>
-          <select name="msisdn" class="form-input">
+          <label class="label">Nomor</label>
+          <select name="msisdn" id="rule_msisdn" class="form-input">
             {{#myxl_accounts}}
             <option value="{{number}}">{{number}} · {{subscription_type}}</option>
             {{/myxl_accounts}}
@@ -163,96 +161,100 @@
         </div>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      {{^has_quota_options}}
+      <div class="text-xs text-amber-300 neu-inset-card rounded-xl px-3 py-2 leading-relaxed">
+        Daftar kuota belum tersedia. Klik <b>Refresh Data</b> di atas dulu supaya nama paket aktif bisa dipilih.
+      </div>
+      {{/has_quota_options}}
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label class="text-xs text-slate-400">Match Kind</label>
-          <select name="match_kind" class="form-input">
-            <option value="any">Any Quota</option>
-            <option value="quota_name">Quota Name (contains)</option>
-            <option value="quota_code">Quota Code (exact)</option>
-            <option value="group_name">Group Name (contains)</option>
+          <label class="label">Nama Kuota</label>
+          <select id="rule_quota" class="form-input">
+            <option value="" data-kind="any">Semua kuota</option>
+            {{#quota_options}}
+            <option value="{{name}}" data-msisdn="{{msisdn}}" data-kind="quota_name">{{name}} · {{msisdn}}</option>
+            {{/quota_options}}
           </select>
+          <input type="hidden" name="match_kind" id="match_kind" value="any">
+          <input type="hidden" name="match_value" id="match_value" value="">
         </div>
         <div>
-          <label class="text-xs text-slate-400">Match Value</label>
-          <input name="match_value" class="form-input" placeholder="(kosongkan untuk any)">
-        </div>
-        <div>
-          <label class="text-xs text-slate-400">Data Type</label>
+          <label class="label">Tipe Benefit</label>
           <select name="match_data_type" class="form-input">
-            <option value="ANY">Any</option>
-            <option value="DATA">Data</option>
-            <option value="VOICE">Voice</option>
-            <option value="TEXT">Text/SMS</option>
+            <option value="ANY">Semua</option>
+            <option value="DATA">Data Internet</option>
+            <option value="VOICE">Telepon</option>
+            <option value="TEXT">SMS</option>
           </select>
         </div>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div>
-          <label class="text-xs text-slate-400">Trigger Metric</label>
+          <label class="label">Kondisi</label>
           <select name="trigger_metric" class="form-input">
-            <option value="remaining_pct">Remaining %</option>
-            <option value="remaining_bytes">Remaining Bytes</option>
-            <option value="remaining_minutes">Remaining Minutes</option>
-            <option value="expiring_in_days">Expiring in Days</option>
+            <option value="remaining_pct">Sisa kuota (%)</option>
+            <option value="remaining_bytes">Sisa data (byte)</option>
+            <option value="remaining_minutes">Sisa menit telepon</option>
+            <option value="expiring_in_days">Hari sampai habis</option>
           </select>
         </div>
         <div>
-          <label class="text-xs text-slate-400">Operator</label>
+          <label class="label">Operator</label>
           <select name="trigger_op" class="form-input">
-            <option value="lt">&lt; (less than)</option>
-            <option value="lte">&lt;= (less or equal)</option>
-            <option value="gt">&gt; (greater than)</option>
-            <option value="gte">&gt;= (greater or equal)</option>
-            <option value="eq">= (equal)</option>
+            <option value="lt">Kurang dari (&lt;)</option>
+            <option value="lte">Kurang/sama (&lt;=)</option>
+            <option value="gt">Lebih dari (&gt;)</option>
+            <option value="gte">Lebih/sama (&gt;=)</option>
+            <option value="eq">Sama dengan (=)</option>
           </select>
         </div>
         <div>
-          <label class="text-xs text-slate-400">Value</label>
-          <input name="trigger_value" type="number" value="10" class="form-input">
+          <label class="label">Nilai</label>
+          <input name="trigger_value" type="number" value="10" class="form-input" inputmode="decimal">
         </div>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
-          <label class="text-xs text-slate-400">Action Type</label>
+          <label class="label">Aksi</label>
           <select name="action_type" id="action_type" class="form-input" onchange="toggleActionFields()">
             <option value="telegram">Kirim Telegram</option>
-            <option value="buy_option">Beli Paket (Auto-buy)</option>
-            <option value="unsubscribe">Unsubscribe</option>
-            <option value="telegram_and_buy">Telegram + Auto-buy</option>
+            <option value="buy_option">Beli Paket (otomatis)</option>
+            <option value="unsubscribe">Stop paket</option>
+            <option value="telegram_and_buy">Telegram + beli otomatis</option>
           </select>
         </div>
         <div>
-          <label class="text-xs text-slate-400">Cooldown (detik)</label>
-          <input name="cooldown_seconds" type="number" value="3600" class="form-input">
+          <label class="label">Jeda pengulangan (detik)</label>
+          <input name="cooldown_seconds" type="number" value="3600" class="form-input" inputmode="numeric">
         </div>
       </div>
 
       <div id="tg_fields">
-        <label class="text-xs text-slate-400">Pesan Telegram</label>
-        <textarea name="action_message" rows="2" class="form-input" placeholder="Kuota {quota} tinggal {pct}% ({remaining}/{total})"></textarea>
-        <div class="text-xs text-slate-500 mt-1">Placeholder: {quota}, {benefit}, {pct}, {remaining}, {total}, {msisdn}</div>
+        <label class="label">Pesan Telegram</label>
+        <textarea name="action_message" rows="6" class="form-input text-sm leading-relaxed">{{{default_telegram_message}}}</textarea>
+        <div class="text-xs text-slate-500 mt-1 leading-relaxed">Variabel: <code class="text-slate-400">{quota}</code>, <code class="text-slate-400">{benefit}</code>, <code class="text-slate-400">{pct}</code>, <code class="text-slate-400">{remaining}</code>, <code class="text-slate-400">{total}</code>, <code class="text-slate-400">{msisdn}</code></div>
       </div>
 
       <div id="buy_fields" class="hidden">
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label class="text-xs text-slate-400">Option Code</label>
+            <label class="label">Kode Paket</label>
             <input name="action_option_code" class="form-input" placeholder="U0Nf...">
           </div>
           <div>
-            <label class="text-xs text-slate-400">Payment Method</label>
+            <label class="label">Metode Bayar</label>
             <select name="action_method" class="form-input">
-              <option value="balance">Balance (Pulsa)</option>
+              <option value="balance">Pulsa</option>
               <option value="qris">QRIS</option>
             </select>
           </div>
         </div>
       </div>
 
-      <button type="submit" class="btn btn-primary text-sm px-4 py-2">Simpan Rule</button>
+      <button type="submit" class="btn btn-primary text-sm w-full sm:w-auto px-4 py-2">Simpan Aturan</button>
     </form>
   </details>
 </section>
@@ -280,4 +282,37 @@ function toggleActionFields() {
   tgF.classList.toggle('hidden', t === 'buy_option' || t === 'unsubscribe');
   buyF.classList.toggle('hidden', t === 'telegram' || t === 'unsubscribe');
 }
+
+(function () {
+  const msisdnSel = document.getElementById('rule_msisdn');
+  const quotaSel = document.getElementById('rule_quota');
+  const kindInp = document.getElementById('match_kind');
+  const valueInp = document.getElementById('match_value');
+  if (!msisdnSel || !quotaSel || !kindInp || !valueInp) return;
+
+  const scopedOpts = Array.from(quotaSel.querySelectorAll('option[data-msisdn]'));
+
+  function syncMatchFields() {
+    const opt = quotaSel.selectedOptions[0];
+    kindInp.value = opt?.dataset.kind || 'any';
+    valueInp.value = quotaSel.value || '';
+  }
+
+  function syncQuotaOptions() {
+    const msisdn = msisdnSel.value;
+    let currentValid = !quotaSel.value;
+    for (const opt of scopedOpts) {
+      const show = opt.dataset.msisdn === msisdn;
+      opt.hidden = !show;
+      opt.disabled = !show;
+      if (show && opt.value === quotaSel.value) currentValid = true;
+    }
+    if (!currentValid) quotaSel.value = '';
+    syncMatchFields();
+  }
+
+  msisdnSel.addEventListener('change', syncQuotaOptions);
+  quotaSel.addEventListener('change', syncMatchFields);
+  syncQuotaOptions();
+})();
 </script>
