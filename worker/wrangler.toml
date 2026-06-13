@@ -11,6 +11,7 @@ ENVIRONMENT = "development"
 # binding = "DB"
 # database_name = "webui-xl"
 # database_id = "<d1-id>"
+# migrations_dir = "migrations"
 
 # [[r2_buckets]]
 # binding = "DATA"
