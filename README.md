@@ -314,4 +314,4 @@ Fork ini dikembangkan oleh [arifianilhamnrr](https://github.com/arifianilhamnrr)
 
 **Environment variables (upstream):** [OUR TELEGRAM CHANNEL](https://t.me/alyxcli)
 
-**Kontak fork ini:** arifianilhamnur@gmail.com
+**Kontak fork ini:** [arifianilhamnur@gmail.com](mailto:arifianilhamnur@gmail.com) · Telegram [@arnrdev](https://t.me/arnrdev)
